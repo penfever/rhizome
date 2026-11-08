@@ -265,7 +265,10 @@ arbitrary output text.
 
 Incomplete lines wait for more bytes. A record is capped at 2 MiB and each read
 pass at 8 MiB. There are at most 4,096 watched directories, 1,024 tracked files,
-and 64 active observed publishers. Capacity exhaustion is visible as degraded
+and 64 active observed publishers. At the tracked-file cap the least recently
+modified file without an active publisher is dropped to make room, so new logs
+are always tracked; a dropped log that is written again is re-tracked from its
+end without replaying history. Other capacity exhaustion is visible as degraded
 coverage; narrow roots or restart after moving old logs outside the watched tree.
 Publisher and subscriber limits from the main README are unchanged. Historical
 files are not advertised until activity is observed. Publishers idle for ten

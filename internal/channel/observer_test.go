@@ -38,7 +38,7 @@ func observerHarness(t *testing.T) *observer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := &observer{ctx: context.Background(), opts: ObserverOptions{Runtime: filepath.Join(dir, "runtime"), ClaudeRoot: filepath.Join(dir, "claude"), CodexRoot: filepath.Join(dir, "codex")}, watch: w, files: map[string]*observedFile{}, dirs: map[string]bool{}}
+	o := &observer{ctx: context.Background(), opts: ObserverOptions{Runtime: filepath.Join(dir, "runtime"), ClaudeRoot: filepath.Join(dir, "claude"), CodexRoot: filepath.Join(dir, "codex")}, watch: w, files: map[string]*observedFile{}, dirs: map[string]bool{}, evicted: map[string]bool{}}
 	for _, p := range []string{o.opts.Runtime, o.opts.ClaudeRoot, o.opts.CodexRoot} {
 		if err := os.MkdirAll(p, 0700); err != nil {
 			t.Fatal(err)
@@ -355,5 +355,47 @@ func TestObservedPathCannotRebindSilently(t *testing.T) {
 	}
 	if got := activityTexts(f.n); len(got) != 1 || got[0] != "new-only" {
 		t.Fatal(got)
+	}
+}
+
+func TestObserverEvictsIdleFileAtCapAndRebaselines(t *testing.T) {
+	o := observerHarness(t)
+	base := time.Now().Add(-48 * time.Hour)
+	path := func(i int) string { return filepath.Join(o.opts.ClaudeRoot, fmt.Sprintf("s%04d.jsonl", i)) }
+	for i := 0; i < maxObservedFiles; i++ {
+		appendLog(t, path(i), claudeRecord(fmt.Sprintf("session-%d", i), "old", "old history"))
+		at := base.Add(time.Duration(i) * time.Minute)
+		if err := os.Chtimes(path(i), at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o.inventory(true)
+	if len(o.files) != maxObservedFiles || o.retry {
+		t.Fatalf("tracked %d files, retry=%t", len(o.files), o.retry)
+	}
+	fresh := filepath.Join(o.opts.ClaudeRoot, "fresh.jsonl")
+	appendLog(t, fresh, claudeRecord("fresh", "new", "new"))
+	o.visit(fresh, false)
+	if o.files[fresh] == nil || o.retry {
+		t.Fatal("new log refused at the cap")
+	}
+	oldest := path(0)
+	if o.files[oldest] != nil || !o.evicted[oldest] || len(o.files) != maxObservedFiles {
+		t.Fatal("oldest idle file not evicted")
+	}
+	// Revisiting the evicted log re-tracks it from EOF: no history replay.
+	o.visit(oldest, false)
+	f := o.files[oldest]
+	if f == nil || o.evicted[oldest] {
+		t.Fatal("evicted log not re-tracked")
+	}
+	appendLog(t, oldest, `{"type":"user","uuid":"prompt","message":{"content":"go"}}`+"\n")
+	appendLog(t, oldest, claudeRecord("session-0", "after", "after eviction"))
+	o.visit(oldest, false)
+	if f.n == nil {
+		t.Fatal("no activity node after new writes")
+	}
+	if got := activityTexts(f.n); len(got) != 1 || got[0] != "after eviction" {
+		t.Fatalf("re-tracked log replayed or missed activity: %q", got)
 	}
 }

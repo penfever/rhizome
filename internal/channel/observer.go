@@ -45,8 +45,11 @@ type observer struct {
 	watch *fsnotify.Watcher
 	files map[string]*observedFile
 	dirs  map[string]bool
-	retry bool
-	index *historyIndex // catalog writer; nil only in harnesses that skip indexing
+	// evicted remembers logs dropped at the tracked-file cap so a later write
+	// re-baselines at EOF instead of replaying the whole file as new activity.
+	evicted map[string]bool
+	retry   bool
+	index   *historyIndex // catalog writer; nil only in harnesses that skip indexing
 }
 
 // RunObserver observes local log changes until cancellation. Only one observer
@@ -85,7 +88,7 @@ func RunObserver(ctx context.Context, opts ObserverOptions) error {
 		return err
 	}
 	defer w.Close()
-	o := &observer{ctx: ctx, opts: opts, watch: w, files: map[string]*observedFile{}, dirs: map[string]bool{}}
+	o := &observer{ctx: ctx, opts: opts, watch: w, files: map[string]*observedFile{}, dirs: map[string]bool{}, evicted: map[string]bool{}}
 	o.index = newHistoryIndex(historyScope{Runtime: opts.Runtime, ClaudeRoot: opts.ClaudeRoot, CodexRoot: opts.CodexRoot, OpenCodeRoot: opts.OpenCodeRoot, PiRoot: opts.PiRoot}, func() bool { return o.retry })
 	defer func() {
 		for _, f := range o.files {
@@ -347,10 +350,13 @@ func (o *observer) visit(path string, initial bool) {
 			}
 			return nil
 		}
-		if len(o.files) >= 1024 {
+		if len(o.files) >= maxObservedFiles && !o.evictIdle() {
 			o.problem("tracked file limit reached")
 			return nil
 		}
+		// An evicted log is treated like a startup file: baseline at EOF.
+		baseline := initial || o.evicted[path]
+		delete(o.evicted, path)
 		c, err := newCollector(path)
 		if err != nil {
 			o.problem("log open failed")
@@ -358,17 +364,20 @@ func (o *observer) visit(path string, initial bool) {
 		}
 		c.agent = o.agent(path)
 		c.passive = true
-		c.unknownTurn = initial
+		c.unknownTurn = baseline
 		// No history is emitted for startup files. New files begin at byte zero,
 		// including bytes written before directory registration completed.
-		if !initial {
+		if !baseline {
 			c.offset = 0
 			c.anchor = nil
 			c.dropping = false
 		}
-		f := &observedFile{c: c, agent: c.agent, last: time.Now(), startupBaseline: initial}
+		f := &observedFile{c: c, agent: c.agent, last: time.Now(), startupBaseline: baseline}
+		if info, err := d.Info(); baseline && err == nil {
+			f.last = info.ModTime() // evict by real recency, not walk order
+		}
 		o.files[path] = f
-		if initial {
+		if baseline {
 			if session, cwd, err := logIdentity(path, f.agent); err == nil {
 				f.session = session
 				f.cwd = cwd
@@ -406,6 +415,34 @@ func (o *observer) visit(path string, initial bool) {
 		return nil
 	})
 }
+
+// maxObservedFiles caps passively tracked logs. At the cap the least recently
+// active file without a live observation node makes room, so new sessions are
+// always tracked; previously new files were refused and the observer
+// re-inventoried every root every 30 s while degraded.
+const maxObservedFiles = 1024
+
+func (o *observer) evictIdle() bool {
+	var oldest string
+	var at time.Time
+	for path, f := range o.files {
+		if f.n != nil {
+			continue
+		}
+		if oldest == "" || f.last.Before(at) {
+			oldest, at = path, f.last
+		}
+	}
+	if oldest == "" {
+		return false
+	}
+	delete(o.files, oldest)
+	if len(o.evicted) < 4*maxObservedFiles {
+		o.evicted[oldest] = true
+	}
+	return true
+}
+
 func logIdentity(path, agent string) (string, string, error) {
 	f, err := os.Open(path)
 	if err != nil {
