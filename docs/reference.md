@@ -25,6 +25,7 @@ the table for diagnostics; `setup --hostname` only writes the file. All startup 
 | `debug` | `RHIZOME_DEBUG` (boolean) | mcp, service install/run `--debug` | `false`; adds a session status substatus and debug-level diagnostics (stderr for MCP, `observer.log` for the service; metadata only) |
 | `claude.config_dir` | `CLAUDE_CONFIG_DIR` | — | `~/.claude` |
 | `claude.projects_dir` | — | service `--claude-root` | effective `claude.config_dir` + `/projects` |
+| `claude.delivery` | `RHIZOME_CLAUDE_DELIVERY` | mcp `--claude-delivery` | `channel`; `hooks` delivers through hook `additionalContext` (see [Claude delivery](#claude-delivery)) |
 | `codex.bin` | — | mcp `--codex-bin` | `codex` |
 | `codex.home` | `CODEX_HOME` | — | `~/.codex` |
 | `codex.sessions_dir` | — | service `--codex-root` | effective `codex.home` + `/sessions` |
@@ -56,6 +57,8 @@ hostname = "" # optional device display label; blank uses the OS hostname
 config_dir = "~/.claude"
 # Omit, or leave empty, to derive from config_dir.
 projects_dir = ""
+# channel (default) or hooks; see Claude delivery.
+delivery = "channel"
 
 [codex]
 bin = "codex"
@@ -259,6 +262,26 @@ the SDK's concurrency-safe writer for `notifications/claude/channel`. It negotia
 MCP **2025-11-25**: testing found that Claude 2.1.302 disables unsolicited channel
 notifications when the SDK negotiates its newer 2026 protocol family.
 Stdout is exclusively MCP; application diagnostics go to stderr.
+
+### Claude delivery
+
+Channel notifications are fire-and-forget: a successful write counts as
+`Written`, but Claude Code discards it unless channels are available to the
+account. On claude.ai Team and Enterprise plans that requires
+`channelsEnabled: true` in the organization's managed settings; Claude shows a
+short startup notice when it rejects the channel. Organizations that cannot
+enable channels can set `claude.delivery = "hooks"` (or pass
+`--claude-delivery hooks`). Rhizome then holds each event, wrapped in the same
+untrusted-peer envelope, and returns it as `additionalContext` from the next
+main-thread `UserPromptSubmit` or `PreToolUse` hook. Events arrive only while
+Claude is working, not while it is idle.
+
+Each event is injected once. A hook drains the inbox only if its request is
+still live and less than three seconds have passed since it started, so a hook
+that runs into Claude's five-second timeout leaves the events for the next
+hook. The inbox is bounded at 64 KiB; beyond that the normal delivery queue
+retains events. `list_sessions` reports `claude_delivery` and
+`hook_queue_depth`, and `counters.HookInjected` counts injected events.
 
 ## Tools
 

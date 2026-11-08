@@ -25,7 +25,7 @@ func TestLayers(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var schema Config
 	for _, s := range schema.settings() {
-		if strings.HasPrefix(s.key, "gateway.") {
+		if strings.HasPrefix(s.key, "gateway.") || s.key == "claude.delivery" {
 			continue
 		} // constrained values have dedicated precedence tests
 		t.Run(s.key, func(t *testing.T) {
@@ -80,6 +80,7 @@ func TestInvalidFiles(t *testing.T) {
 		{`codex.home = "relative"`, "codex.home"},
 		{`claude.projects_dir = "relative"`, "claude.projects_dir"},
 		{"claude.projects_dir = '/same'\ncodex.sessions_dir = '/same'", "claude.projects_dir"},
+		{"claude.delivery = 'push'", "claude.delivery"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {
@@ -335,5 +336,29 @@ func TestDebugPrecedence(t *testing.T) {
 	var out bytes.Buffer
 	if err := c.Write(&out); err != nil || !strings.Contains(out.String(), "debug = true # source: flag") {
 		t.Fatal(out.String(), err)
+	}
+}
+
+func TestClaudeDelivery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c, err := Resolve(map[string]string{"config": fixture(t, "")}, noenv)
+	if err != nil || c.Claude.Delivery != ClaudeDeliveryChannel || c.Sources["claude.delivery"] != "default" {
+		t.Fatalf("default: %q %v", c.Claude.Delivery, err)
+	}
+	p := fixture(t, "[claude]\ndelivery = 'hooks'")
+	if c, err = Resolve(map[string]string{"config": p}, noenv); err != nil || c.Claude.Delivery != ClaudeDeliveryHooks {
+		t.Fatalf("file: %q %v", c.Claude.Delivery, err)
+	}
+	if c, err = Resolve(map[string]string{"config": p, "claude-delivery": "channel"}, noenv); err != nil || c.Claude.Delivery != ClaudeDeliveryChannel {
+		t.Fatalf("flag override: %q %v", c.Claude.Delivery, err)
+	}
+	env := func(k string) string {
+		if k == "RHIZOME_CLAUDE_DELIVERY" {
+			return "hooks"
+		}
+		return ""
+	}
+	if c, err = Resolve(map[string]string{"config": fixture(t, "")}, env); err != nil || c.Claude.Delivery != ClaudeDeliveryHooks {
+		t.Fatalf("env: %q %v", c.Claude.Delivery, err)
 	}
 }
