@@ -263,12 +263,100 @@ func TestCodexPaginationBaselineAndCap(t *testing.T) {
 	}
 	f.endless = true
 	f.itemCalls = 0
-	if c.scan(n.ctx, n, 1) || f.itemCalls != 4 || n.deliveryReady {
-		t.Fatal("unbounded pagination")
+	// An oversized turn is skipped with one gap; delivery stays open because
+	// the thread itself is verified idle.
+	if !c.scan(n.ctx, n, 1) || f.itemCalls != 4 || !n.deliveryReady {
+		t.Fatal("unbounded pagination or delivery closed by collection cap")
 	}
 	if len(n.history) != 1 || n.history[0].Kind != "gap" {
 		t.Fatal("missing pagination gap")
 	}
+	f.itemCalls = 0
+	if !c.scan(n.ctx, n, 1) || f.itemCalls != 0 || len(n.history) != 1 || !n.deliveryReady {
+		t.Fatalf("oversized turn re-paged or re-gapped: calls=%d history=%d", f.itemCalls, len(n.history))
+	}
+}
+
+// oversizedCodex pages one turn without end; other turns use fakeCodex.
+type oversizedCodex struct {
+	fakeCodex
+	huge string
+}
+
+func (f *oversizedCodex) call(ctx context.Context, method string, params, out any) error {
+	p := params.(map[string]any)
+	if method == "thread/items/list" && p["turnId"] == f.huge {
+		next := "next"
+		page := itemPage{Data: []itemEntry{{f.huge, codexItem{ID: "x", Type: "agentMessage", Text: "noise"}}}, Next: &next}
+		b, _ := json.Marshal(page)
+		return json.Unmarshal(b, out)
+	}
+	return f.fakeCodex.call(ctx, method, params, out)
+}
+
+func TestCodexOversizedTurnKeepsDeliveryAndLaterTurnsCollect(t *testing.T) {
+	n := node(t)
+	n.identity.SessionId = threadA
+	n.identity.Generation = 1
+	f := &oversizedCodex{fakeCodex: fakeCodex{thread: threadA, status: "idle", turns: []codexTurn{{"huge", "completed"}}, items: map[string][]codexItem{}}, huge: "huge"}
+	c := newCodexCollector(threadA, f)
+	n.codex = c
+	for i := 0; i < 3; i++ {
+		if !c.scan(n.ctx, n, 1) || !n.deliveryReady {
+			t.Fatalf("scan %d closed delivery after an oversized turn", i)
+		}
+	}
+	n.mu.Lock()
+	gaps := n.stats.CollectionGaps
+	n.mu.Unlock()
+	if gaps != 1 {
+		t.Fatalf("want one gap for the oversized turn, got %d", gaps)
+	}
+	f.mu.Lock()
+	f.turns = []codexTurn{{"next", "inProgress"}, {"huge", "completed"}}
+	f.items["next"] = []codexItem{{ID: "a", Type: "agentMessage", Text: "fresh work"}}
+	f.mu.Unlock()
+	if !c.scan(n.ctx, n, 1) {
+		t.Fatal("scan failed after a new turn")
+	}
+	if got := activityTexts(n); len(got) != 1 || got[0] != "fresh work" {
+		t.Fatalf("later turn not collected: %q", got)
+	}
+}
+
+func TestCodexWakeEndsBackoff(t *testing.T) {
+	n := node(t)
+	n.identity.SessionId = threadA
+	n.identity.Generation = 1
+	f := &fakeCodex{thread: threadA, status: "idle", fail: true}
+	c := newCodexCollector(threadA, f)
+	n.codex = c
+	n.wg.Add(1)
+	go func() { defer n.wg.Done(); c.run(n.ctx, n, 1) }()
+	// Let the failing reader push the backoff past one second.
+	eventually(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return len(f.calls) >= 2
+	})
+	f.mu.Lock()
+	f.fail = false
+	before := len(f.calls)
+	f.mu.Unlock()
+	c.wake <- struct{}{}
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		n.mu.Lock()
+		ready := n.deliveryReady
+		n.mu.Unlock()
+		if ready {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t.Fatalf("wake did not end backoff (calls %d -> %d)", before, len(f.calls))
 }
 func TestCodexUnavailableRetainsDelivery(t *testing.T) {
 	n := node(t)

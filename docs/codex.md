@@ -132,6 +132,11 @@ image-generation prompt) are published only with
 duplicates. Replacement, rollback, compaction, and pagination overflow produce
 explicit discontinuity notices. Each scan is limited to four pages of 50 turns,
 four pages of 128 items per turn, 2,048 items, and 8 MiB of retained item text.
+A turn that exceeds the per-turn item cap is skipped with one discontinuity
+notice and is not re-read; later turns are collected normally. Collection caps
+never close delivery: while `thread/read` reports the thread idle or active,
+queued messages are handed to `codex queue`. A hook wake-up ends a reconnect
+backoff early.
 Unsupported ephemeral/legacy history is reported as unavailable; no full-history
 fallback is used. If collection is unavailable at binding, the first successful
 read becomes the baseline, so activity during that interval is not replayed.

@@ -124,9 +124,12 @@ type codexCollector struct {
 	wake     chan struct{}
 	baseline bool
 	lastTurn string
-	items    map[string]itemState
-	turns    map[string]string
-	order    []string
+	// oversized is a turn whose items exceed the pagination cap. Its activity
+	// is skipped (one gap notice) so it neither blocks delivery nor re-pages.
+	oversized string
+	items     map[string]itemState
+	turns     map[string]string
+	order     []string
 }
 
 func newCodexCollector(thread string, reader codexReader) *codexCollector {
@@ -141,22 +144,15 @@ func (c *codexCollector) run(ctx context.Context, n *Node, gen uint64) {
 			wait += time.Duration(rand.IntN(250)) * time.Millisecond
 		}
 		timer := time.NewTimer(wait)
-		if delay > time.Second {
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-		} else {
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			case <-c.wake:
-				timer.Stop()
-			}
+		// A hook wake-up is fresh evidence the thread is loaded, so it ends a
+		// backoff early instead of waiting up to 30 s to restore delivery.
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		case <-c.wake:
+			timer.Stop()
 		}
 		if c.scan(ctx, n, gen) {
 			delay = time.Second
@@ -271,6 +267,9 @@ func (c *codexCollector) scan(ctx context.Context, n *Node, gen uint64) bool {
 	totalItems, totalBytes := 0, 0
 	for _, t := range turns {
 		cursor = nil
+		if t.ID == c.oversized {
+			continue
+		}
 		complete := false
 		for page := 0; page < 4; page++ {
 			var p itemPage
@@ -284,7 +283,9 @@ func (c *codexCollector) scan(ctx context.Context, n *Node, gen uint64) bool {
 				totalBytes += e.Item.size()
 				if totalItems > 2048 || totalBytes > 8*1024*1024 {
 					c.gap(n, gen, "snapshot limit exceeded")
-					c.state(n, "snapshot limit exceeded", false)
+					// The thread is verified idle/active above; a collection cap
+					// must not stop inbound delivery.
+					c.state(n, "snapshot limit exceeded", true)
 					return false
 				}
 				if e.TurnID != t.ID {
@@ -300,9 +301,12 @@ func (c *codexCollector) scan(ctx context.Context, n *Node, gen uint64) bool {
 			cursor = p.Next
 		}
 		if !complete {
-			c.gap(n, gen, "item pagination limit exceeded")
-			c.state(n, "item limit exceeded; awaiting next turn", false)
-			return false
+			// Skip this turn's activity once, then keep watching later turns.
+			// Previously every scan re-paged it, emitted a gap and held
+			// delivery closed until a new turn started.
+			c.oversized = t.ID
+			delete(entries, t.ID)
+			c.gap(n, gen, "item pagination limit exceeded; activity for turn "+t.ID+" skipped")
 		}
 	}
 	if c.baseline && c.lastTurn != "" {
