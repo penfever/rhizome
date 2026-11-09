@@ -68,6 +68,7 @@ type codexNodes struct {
 	peerActivity   config.PeerActivityPolicy
 	details        bool // [sessions].share_prompts_and_tools
 	debug          bool
+	steer          bool // codex.delivery = "steer"
 }
 
 func (m *codexNodes) resolve(r *mcp.CallToolRequest) (*Node, error) {
@@ -94,28 +95,18 @@ func (m *codexNodes) resolve(r *mcp.CallToolRequest) (*Node, error) {
 	n.debug = m.debug
 	n.collectionState = "waiting for session hook"
 	n.codex = newCodexCollector(thread, &appReader{socket: m.socket})
-	n.notify = func(ctx context.Context, text string, meta map[string]string) error {
-		var read struct {
-			Thread struct {
-				Status struct {
-					Type string `json:"type"`
-				} `json:"status"`
-			} `json:"thread"`
-		}
-		if err := n.codex.reader.call(ctx, "thread/read", map[string]any{"threadId": thread}, &read); err != nil || (read.Thread.Status.Type != "idle" && read.Thread.Status.Type != "active") {
-			n.mu.Lock()
-			n.deliveryReady = false
-			n.mu.Unlock()
-			return errDestinationUnavailable
-		}
-		return queueCodex(ctx, m.binary, m.socket, thread, text, meta)
-	}
+	n.codexOut = newCodexOutbox(m.steer, func(ctx context.Context, message string) error {
+		return queueCodex(ctx, m.binary, m.socket, thread, message)
+	})
+	n.notify = n.holdForCodex
 	if err := n.start(m.opts); err != nil {
 		n.close()
 		return nil, err
 	}
 	n.wg.Add(1)
 	go func() { defer n.wg.Done(); n.deliver(n.ctx) }()
+	n.wg.Add(1)
+	go func() { defer n.wg.Done(); n.runCodexOutbox(n.ctx, thread) }()
 	m.nodes[thread] = n
 	return n, nil
 }
@@ -223,11 +214,12 @@ func (w *limitedCapture) Write(p []byte) (int, error) {
 	}
 	return n, nil
 }
-func queueCodex(ctx context.Context, binary, socket, thread, text string, meta map[string]string) error {
+
+// queueCodex queues message, already wrapped in peer envelopes, as one item.
+func queueCodex(ctx context.Context, binary, socket, thread, message string) error {
 	if !filepath.IsAbs(binary) || !filepath.IsAbs(socket) || !threadUUID.MatchString(thread) {
 		return errors.New("invalid local Codex delivery configuration")
 	}
-	message := peerEnvelope(text, meta)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	// The endpoint is local configuration, never supplied by a peer. Pinning it
@@ -266,7 +258,8 @@ func RunCodex(c config.Config, o Options) error {
 	history := newHistoryService(historyScope{Runtime: c.RuntimeDir, ClaudeRoot: c.Claude.ProjectsDir, CodexRoot: c.Codex.SessionsDir, OpenCodeRoot: c.OpenCode.DataDir, PiRoot: c.Pi.SessionsDir})
 	history.details = c.Sessions.SharePromptsAndTools
 	history.peerActivity = c.Sessions.SharePeerTriggeredActivity
-	manager := &codexNodes{ctx: ctx, nodes: map[string]*Node{}, binary: resolved, socket: filepath.Join(home, "app-server-control", "app-server-control.sock"), opts: o, history: history, recentWindow: c.RecentWindow, details: c.Sessions.SharePromptsAndTools, peerActivity: c.Sessions.SharePeerTriggeredActivity, debug: c.Debug}
+	manager := &codexNodes{ctx: ctx, nodes: map[string]*Node{}, binary: resolved, socket: filepath.Join(home, "app-server-control", "app-server-control.sock"), opts: o, history: history, recentWindow: c.RecentWindow, details: c.Sessions.SharePromptsAndTools, peerActivity: c.Sessions.SharePeerTriggeredActivity, debug: c.Debug, steer: c.Codex.Delivery == config.CodexDeliverySteer}
+	slog.Info("codex_delivery", "path", c.Codex.Delivery)
 	defer manager.close()
 	server := makeServer(manager.resolve, agentCodex, func() {}, history)
 	session, err := server.Connect(ctx, &mcp.StdioTransport{}, nil)

@@ -84,6 +84,9 @@ type counters struct {
 	// HookInjected counts events returned to Claude as hook additionalContext
 	// (claude.delivery = "hooks"); Written counts them when they are held.
 	HookInjected uint64
+	// Steered counts events injected into a running Codex turn (codex.delivery
+	// = "steer"); QueueHandoffs counts those handed to `codex queue`.
+	Steered, SteerFailures uint64
 }
 type Node struct {
 	peerActivity config.PeerActivityPolicy
@@ -104,6 +107,9 @@ type Node struct {
 	hookDelivery   bool
 	hookInbox      []string
 	hookInboxBytes int
+	// codexOut holds Codex events until they can be steered or queued as one
+	// message; nil for other agents. Guarded by mu.
+	codexOut *codexOutbox
 	// external marks delivery to an agent's own queue (Codex, OpenCode): gated
 	// on deliveryReady and counted as queue handoffs.
 	external       bool

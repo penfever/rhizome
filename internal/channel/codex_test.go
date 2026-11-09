@@ -26,9 +26,25 @@ type fakeCodex struct {
 	items          map[string][]codexItem
 	fail           bool
 	calls          []string
+	steerErr       error
+	steered        []steerCall
 }
+type steerCall struct{ turn, text string }
 
 func (f *fakeCodex) close() {}
+func (f *fakeCodex) steer(_ context.Context, thread, turn, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "turn/steer")
+	if f.steerErr != nil {
+		return f.steerErr
+	}
+	if thread != f.thread || f.status != "active" || len(f.turns) == 0 || f.turns[0].ID != turn || f.turns[0].Status != "inProgress" {
+		return &appRPCError{-32600, "expected active turn id", "turn/steer"}
+	}
+	f.steered = append(f.steered, steerCall{turn, text})
+	return nil
+}
 func (f *fakeCodex) call(_ context.Context, method string, params, out any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -182,7 +198,7 @@ func TestCodexQueueArgumentsTimeoutAndBoundedOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := "$(touch /should-never-run); `whoami`\n--remote wss://peer"
-	if err := queueCodex(context.Background(), binary, "/local.sock", threadA, text, map[string]string{"session_id": threadB}); err != nil {
+	if err := queueCodex(context.Background(), binary, "/local.sock", threadA, text); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(args)
@@ -193,7 +209,7 @@ func TestCodexQueueArgumentsTimeoutAndBoundedOutput(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 7\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := queueCodex(context.Background(), binary, "/local.sock", threadA, "hi", nil); err == nil {
+	if err := queueCodex(context.Background(), binary, "/local.sock", threadA, "hi"); err == nil {
 		t.Fatal("failed CLI reported success")
 	}
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexec sleep 10\n"), 0700); err != nil {
@@ -202,7 +218,7 @@ func TestCodexQueueArgumentsTimeoutAndBoundedOutput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if queueCodex(ctx, binary, "/local.sock", threadA, "hi", nil) == nil || time.Since(start) > 2*time.Second {
+	if queueCodex(ctx, binary, "/local.sock", threadA, "hi") == nil || time.Since(start) > 2*time.Second {
 		t.Fatal("queue did not cancel")
 	}
 	w := &limitedCapture{}
@@ -211,7 +227,7 @@ func TestCodexQueueArgumentsTimeoutAndBoundedOutput(t *testing.T) {
 	if err != nil || n != len(p) || len(w.b) != 4096 {
 		t.Fatal("output capture unbounded")
 	}
-	if err := queueCodex(context.Background(), binary, "/local.sock", "not-uuid", "hi", nil); err == nil {
+	if err := queueCodex(context.Background(), binary, "/local.sock", "not-uuid", "hi"); err == nil {
 		t.Fatal("non-UUID accepted")
 	}
 }

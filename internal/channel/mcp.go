@@ -87,6 +87,9 @@ func (n *Node) status() map[string]any {
 		out["claude_delivery"] = "hooks"
 		out["hook_queue_depth"] = len(n.hookInbox)
 	}
+	if n.codexOut != nil {
+		out["codex_outbox"] = n.codexOut.status()
+	}
 	return out
 }
 
@@ -270,7 +273,7 @@ func makeServer(resolve func(*mcp.CallToolRequest) (*Node, error), kind agentKin
 		}
 		return result(n.renameSession(history, in.SessionID, in.Name))
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "send", Description: "Send text to an exact live session_id; success means accepted in receiver's bounded queue, not read. Recent-only sessions are refused without queueing."}, func(ctx context.Context, r *mcp.CallToolRequest, in sendInput) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "send", Description: "Send text to an exact live session_id; success means accepted in receiver's bounded queue, not read. Use delivery_status with the returned message_id to confirm the receiver has it. Recent-only sessions are refused without queueing."}, func(ctx context.Context, r *mcp.CallToolRequest, in sendInput) (*mcp.CallToolResult, any, error) {
 		n, resolveErr := resolve(r)
 		if resolveErr != nil {
 			return result(nil, resolveErr)
@@ -280,6 +283,19 @@ func makeServer(resolve func(*mcp.CallToolRequest) (*Node, error), kind agentKin
 	})
 	if history != nil {
 		history.register(s, resolve)
+		mcp.AddTool(s, &mcp.Tool{Name: "delivery_status", Description: "Check whether a sent message has reached the receiving agent on this device: in_transcript means its envelope is in the receiver's native log; not_in_transcript means it is still held (gateway outbox, hook inbox or the agent's own queue). Read-only; never contacts the agent."}, func(ctx context.Context, r *mcp.CallToolRequest, in deliveryStatusInput) (*mcp.CallToolResult, any, error) {
+			if _, err := resolve(r); err != nil {
+				return result(nil, err)
+			}
+			ctx, cancel := context.WithTimeout(ctx, historyDeadline)
+			defer cancel()
+			out, e := history.deliveryStatus(ctx, in)
+			if e != nil {
+				r, err := historyResult(nil, e)
+				return r, nil, err
+			}
+			return result(out, nil)
+		})
 	}
 	return s
 }

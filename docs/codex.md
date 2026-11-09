@@ -149,15 +149,38 @@ thread, has a five-second deadline, and drains CLI output into a bounded private
 capture. Stdout remains MCP-only. No retry follows a CLI error or timeout because
 acceptance may already have happened.
 
+Codex starts one turn per queued item, and only after the running turn ends.
+Queueing every peer event separately therefore made the N-th message sent
+during a long turn wait N turns while `send` still reported success. The
+gateway instead holds events in a bounded (64 KiB) per-thread outbox and hands
+them over as one message, each event keeping its own envelope:
+
+- **Idle thread:** `codex queue`, which starts a turn at once.
+- **Running turn, `codex.delivery = "queue"` (default):** at most one Rhizome
+  item is queued per turn. Later events wait in the outbox and are queued
+  together when the next turn starts, so a backlog drains in one turn.
+- **Running turn, `codex.delivery = "steer"`:** App Server `turn/steer` with the
+  in-progress turn's ID appends the events to the running turn, as when the
+  user types during a turn. The model reads them at its next step. A failed
+  steer (compaction, review, a turn that just ended) is retried every two
+  seconds. After a minute of failures the events are queued instead.
+
 App Server `notLoaded`, `systemError`, a disconnected reader, or unavailable
-history pauses delivery while retaining the bounded queue. The receiver checks
-loaded status again immediately before launching the queue command. There is
-still a race if Codex unloads the thread after that check; the CLI controls final
-queue semantics. Successful handoff is not a promise that a model read or acted
-on the event. `Received`/`Queued` count receiver acceptance; `Written` counts event
-summaries handed off; `QueueHandoffs` counts successful CLI invocations and
-`QueueFailures` counts failed invocations. Status includes the last delivery
-error and the independent collection state.
+history keeps events held. A queue command that exits with an error keeps them
+for retry. One that times out or is killed may already have queued the
+message, so it is not retried; `list_sessions` reports it under
+`codex_outbox.uncertain`. A successful handoff is not a promise that a model
+read or acted on the event.
+
+`list_sessions` reports `codex_outbox`: `mode`, `held`, `held_message_ids`,
+`oldest_held_at`, a human-readable `state` (for example "2 held for the end of
+Codex turn …") and `last_handoff`. `Received`/`Queued` count receiver
+acceptance and `Written` counts events placed in the outbox. `QueueHandoffs`
+and `Steered` count events handed to `codex queue` or steered.
+`QueueFailures` and `SteerFailures` count failed attempts. A sender on the
+same device can call `delivery_status(session_id, agent_type, message_id)`,
+which reports `in_transcript` once the envelope is in the receiver's native
+log.
 
 The existing two-second/8-KiB automatic batches, 256-event receiving queue,
 ten explicit sends/publications per minute per node, and 30-notification circuit

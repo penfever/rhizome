@@ -27,6 +27,7 @@ the table for diagnostics; `setup --hostname` only writes the file. All startup 
 | `claude.projects_dir` | — | service `--claude-root` | effective `claude.config_dir` + `/projects` |
 | `claude.delivery` | `RHIZOME_CLAUDE_DELIVERY` | mcp `--claude-delivery` | `channel`; `hooks` delivers through hook `additionalContext` (see [Claude delivery](#claude-delivery)) |
 | `codex.bin` | — | mcp `--codex-bin` | `codex` |
+| `codex.delivery` | `RHIZOME_CODEX_DELIVERY` | mcp `--codex-delivery` | `queue`; `steer` injects into a running turn (see [Codex delivery](codex.md)) |
 | `codex.home` | `CODEX_HOME` | — | `~/.codex` |
 | `codex.sessions_dir` | — | service `--codex-root` | effective `codex.home` + `/sessions` |
 | `opencode.data_dir` | — | service `--opencode-root` | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` |
@@ -62,6 +63,8 @@ delivery = "channel"
 
 [codex]
 bin = "codex"
+# queue (default) or steer; see docs/codex.md.
+delivery = "queue"
 home = "~/.codex"
 # Omit, or leave empty, to derive from home.
 sessions_dir = ""
@@ -293,6 +296,7 @@ retains events. `list_sessions` reports `claude_delivery` and
 | `unsubscribe(session_id)` | Cancel follow and remove pending activity from that subscription. Direct messages are independent. |
 | `publish(text, reply_to?)` | Announce to current subscribers. |
 | `send(session_id, text, reply_to?)` | Direct message without a subscription. Returns a stable message ID and receiver queue acceptance. |
+| `delivery_status(session_id, agent_type, message_id)` | Whether a sent message has reached the receiving agent on this device: `in_transcript` (with `recorded_at` when the line has a timestamp) once its envelope is in the receiver's native log, else `not_in_transcript`. Scans at most the last 128 MiB of the log. Requires the observer service's catalog. |
 | `observe_session(...)` | Internal hook binding/refresh and transcript wake-up. Not offered in OpenCode mode. |
 | `send_file`, `list_files`, `accept_file`, `cancel_file` | Explicit file offers between sessions on paired hosts; see [file transfers](files.md). |
 | `search_sessions(filters…, host_id?)` | Metadata search of the local history catalog by exact ID, agent, project path, title substring, and activity date, with deterministic pagination. Rows carry history availability and current live status separately. Requires the observer service's catalog. With `host_id`, searches one directly paired host that opted in. |

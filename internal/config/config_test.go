@@ -25,7 +25,7 @@ func TestLayers(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var schema Config
 	for _, s := range schema.settings() {
-		if strings.HasPrefix(s.key, "gateway.") || s.key == "claude.delivery" {
+		if strings.HasPrefix(s.key, "gateway.") || s.key == "claude.delivery" || s.key == "codex.delivery" {
 			continue
 		} // constrained values have dedicated precedence tests
 		t.Run(s.key, func(t *testing.T) {
@@ -81,6 +81,7 @@ func TestInvalidFiles(t *testing.T) {
 		{`claude.projects_dir = "relative"`, "claude.projects_dir"},
 		{"claude.projects_dir = '/same'\ncodex.sessions_dir = '/same'", "claude.projects_dir"},
 		{"claude.delivery = 'push'", "claude.delivery"},
+		{"codex.delivery = 'push'", "codex.delivery"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {
@@ -360,5 +361,29 @@ func TestClaudeDelivery(t *testing.T) {
 	}
 	if c, err = Resolve(map[string]string{"config": fixture(t, "")}, env); err != nil || c.Claude.Delivery != ClaudeDeliveryHooks {
 		t.Fatalf("env: %q %v", c.Claude.Delivery, err)
+	}
+}
+
+func TestCodexDelivery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c, err := Resolve(map[string]string{"config": fixture(t, "")}, noenv)
+	if err != nil || c.Codex.Delivery != CodexDeliveryQueue || c.Sources["codex.delivery"] != "default" {
+		t.Fatalf("default: %q %v", c.Codex.Delivery, err)
+	}
+	p := fixture(t, "[codex]\ndelivery = 'steer'")
+	if c, err = Resolve(map[string]string{"config": p}, noenv); err != nil || c.Codex.Delivery != CodexDeliverySteer {
+		t.Fatalf("file: %q %v", c.Codex.Delivery, err)
+	}
+	if c, err = Resolve(map[string]string{"config": p, "codex-delivery": "queue"}, noenv); err != nil || c.Codex.Delivery != CodexDeliveryQueue {
+		t.Fatalf("flag override: %q %v", c.Codex.Delivery, err)
+	}
+	env := func(k string) string {
+		if k == "RHIZOME_CODEX_DELIVERY" {
+			return "steer"
+		}
+		return ""
+	}
+	if c, err = Resolve(map[string]string{"config": fixture(t, "")}, env); err != nil || c.Codex.Delivery != CodexDeliverySteer {
+		t.Fatalf("env: %q %v", c.Codex.Delivery, err)
 	}
 }

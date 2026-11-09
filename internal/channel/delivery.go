@@ -204,7 +204,8 @@ func (n *Node) deliver(ctx context.Context) {
 		n.mu.Lock()
 		if err == nil {
 			n.stats.Written += uint64(count)
-			if n.external {
+			if n.external && n.codexOut == nil {
+				// The Codex outbox counts its own handoffs when it flushes.
 				n.stats.QueueHandoffs++
 				n.deliveryError = ""
 			}

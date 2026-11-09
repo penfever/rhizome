@@ -42,6 +42,10 @@ type Config struct {
 		Home        string      `toml:"home"`         // CODEX_HOME; App Server socket and skills live under it.
 		SessionsDir string      `toml:"sessions_dir"` // Session log root the observer watches; default <home>/sessions.
 		PeerHistory PeerHistory `toml:"peer_history"` // Override of gateway.history for Codex-sourced history.
+		// Delivery selects how peer events reach a Codex thread with a running
+		// turn: "queue" hands them to `codex queue` (at most one item per turn);
+		// "steer" injects them into the running turn with turn/steer.
+		Delivery string `toml:"delivery"`
 	} `toml:"codex"`
 	OpenCode struct {
 		DataDir     string      `toml:"data_dir"`     // Directory holding opencode.db; default $XDG_DATA_HOME/opencode or ~/.local/share/opencode.
@@ -118,6 +122,12 @@ const (
 	ClaudeDeliveryHooks   = "hooks"
 )
 
+// Codex delivery paths for codex.delivery.
+const (
+	CodexDeliveryQueue = "queue"
+	CodexDeliverySteer = "steer"
+)
+
 type setting struct {
 	key, env, flag string
 	value          *string
@@ -135,6 +145,7 @@ func (c *Config) settings() []setting {
 		{"claude.projects_dir", "", "claude-root", &c.Claude.ProjectsDir, true},
 		{"claude.delivery", "RHIZOME_CLAUDE_DELIVERY", "claude-delivery", &c.Claude.Delivery, false},
 		{"codex.bin", "", "codex-bin", &c.Codex.Bin, false},
+		{"codex.delivery", "RHIZOME_CODEX_DELIVERY", "codex-delivery", &c.Codex.Delivery, false},
 		{"codex.home", "CODEX_HOME", "", &c.Codex.Home, true},
 		{"codex.sessions_dir", "", "codex-root", &c.Codex.SessionsDir, true},
 		{"opencode.data_dir", "", "opencode-root", &c.OpenCode.DataDir, true},
@@ -394,6 +405,8 @@ func resolveDocument(c Config, home string, file []byte, flags map[string]string
 				*s.value = filepath.Join(c.Claude.ConfigDir, "projects")
 			case "claude.delivery":
 				*s.value = ClaudeDeliveryChannel
+			case "codex.delivery":
+				*s.value = CodexDeliveryQueue
 			case "codex.sessions_dir":
 				*s.value = filepath.Join(c.Codex.Home, "sessions")
 			case "opencode.data_dir", "pi.sessions_dir":
@@ -419,6 +432,9 @@ func resolveDocument(c Config, home string, file []byte, flags map[string]string
 	}
 	if c.Claude.Delivery != ClaudeDeliveryChannel && c.Claude.Delivery != ClaudeDeliveryHooks {
 		return c, fmt.Errorf("config %s: claude.delivery must be %q or %q (%s)", path, ClaudeDeliveryChannel, ClaudeDeliveryHooks, c.Sources["claude.delivery"])
+	}
+	if c.Codex.Delivery != CodexDeliveryQueue && c.Codex.Delivery != CodexDeliverySteer {
+		return c, fmt.Errorf("config %s: codex.delivery must be %q or %q (%s)", path, CodexDeliveryQueue, CodexDeliverySteer, c.Sources["codex.delivery"])
 	}
 	if err := c.Gateway.Validate(); err != nil {
 		return c, err

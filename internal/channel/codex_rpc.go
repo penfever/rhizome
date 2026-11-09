@@ -13,8 +13,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Deliberately read-only. This client cannot load a thread, start a turn,
-// steer work, answer approvals, or manage the user's daemon.
+// Read-only except for steer, which only codex.delivery = "steer" uses to
+// inject held peer events into a running turn. This client cannot load a
+// thread, start a turn, answer approvals, or manage the user's daemon.
 type appRPCError struct {
 	code            int
 	message, method string
@@ -24,6 +25,9 @@ func (e *appRPCError) Error() string { return fmt.Sprintf("App Server %s error %
 
 type codexReader interface {
 	call(context.Context, string, any, any) error
+	// steer appends text to the running turn; it fails unless turnID is the
+	// thread's active, steerable turn.
+	steer(ctx context.Context, thread, turnID, text string) error
 	close()
 }
 type appReader struct {
@@ -46,6 +50,22 @@ func (a *appReader) call(ctx context.Context, method string, params, out any) er
 	default:
 		return errors.New("App Server method is not read-only")
 	}
+	return a.do(ctx, method, params, out)
+}
+func (a *appReader) steer(ctx context.Context, thread, turnID, text string) error {
+	params := map[string]any{"threadId": thread, "expectedTurnId": turnID, "input": []map[string]any{{"type": "text", "text": text}}}
+	var out struct {
+		TurnID string `json:"turnId"`
+	}
+	if err := a.do(ctx, "turn/steer", params, &out); err != nil {
+		return err
+	}
+	if out.TurnID != turnID {
+		return fmt.Errorf("App Server steered turn %q, expected %q", out.TurnID, turnID)
+	}
+	return nil
+}
+func (a *appReader) do(ctx context.Context, method string, params, out any) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
