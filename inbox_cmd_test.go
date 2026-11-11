@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +56,16 @@ func TestInboxCommands(t *testing.T) {
 	out.Reset()
 	if err := inboxCommand(args, &out); err != nil || !strings.Contains(out.String(), "No unread") {
 		t.Fatalf("second read: %v %q", err, out.String())
+	}
+	// --pid: a watched job that finishes first ends the wait with exit 3.
+	job := exec.Command("sleep", "0.2")
+	if err := job.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go job.Wait()
+	err = waitInboxCommand(append(args, "--timeout", "10", "--pid", strconv.Itoa(job.Process.Pid)), &out)
+	if !errors.As(err, &code) || code != waitInboxPidExit {
+		t.Fatalf("pid exit: %v", err)
 	}
 	if err := inboxCommand([]string{"--runtime-dir", runtime}, &out); err == nil {
 		t.Fatal("missing --session accepted")

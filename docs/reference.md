@@ -327,11 +327,12 @@ end) can still read its mail:
   messages, framed as untrusted peer content, and marks them read
   (`<session_id>.cursor`). `--all` prints every message; `--peek` leaves the
   cursor alone.
-- `rhizome wait-inbox --session <id> [--timeout <seconds|duration>]` exits 0 as
-  soon as the session has unread mail (immediately if some is already unread)
-  and 2 when the timeout passes; 0 waits forever. It polls every 500 ms and is
-  meant to run beside a long wait, for example
-  `wait_for_job.sh & rhizome wait-inbox --session "$SID" --timeout 3600 & wait -n`.
+- `rhizome wait-inbox --session <id> [--timeout <seconds|duration>] [--pid <pid>]`
+  exits 0 as soon as the session has unread mail (immediately if some is
+  already unread), 2 when the timeout passes (0 waits forever) and 3 when the
+  `--pid` process exits first. It polls every 500 ms. To wait on "job finished
+  or mail arrived" in any POSIX shell:
+  `wait_for_job.sh & rhizome wait-inbox --session "$SID" --timeout 3600 --pid $!`.
 
 Activity feed events are not written. A message reaches the inbox even when the
 native queue is full.

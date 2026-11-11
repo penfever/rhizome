@@ -218,9 +218,13 @@ func UnreadInboxCount(runtime, session string) (int, error) {
 // ErrInboxTimeout means WaitInbox reached its deadline with no unread mail.
 var ErrInboxTimeout = errors.New("no unread rhizome messages before timeout")
 
+// ErrWatchedExited means the process WaitInbox was also watching has exited.
+var ErrWatchedExited = errors.New("watched process exited")
+
 // WaitInbox blocks until session has at least one unread message, returning the
-// unread count, or until ctx ends (ErrInboxTimeout on deadline).
-func WaitInbox(ctx context.Context, runtime, session string, poll time.Duration) (int, error) {
+// unread count; until alive (when non-nil) reports false (ErrWatchedExited); or
+// until ctx ends (ErrInboxTimeout on deadline).
+func WaitInbox(ctx context.Context, runtime, session string, poll time.Duration, alive func() bool) (int, error) {
 	if _, _, _, _, err := inboxPaths(runtime, session); err != nil {
 		return 0, err
 	}
@@ -233,6 +237,9 @@ func WaitInbox(ctx context.Context, runtime, session string, poll time.Duration)
 		}
 		if n > 0 {
 			return n, nil
+		}
+		if alive != nil && !alive() {
+			return 0, ErrWatchedExited
 		}
 		select {
 		case <-ctx.Done():

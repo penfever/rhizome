@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,6 +27,9 @@ func (e exitCode) Error() string { return "exit " + strconv.Itoa(int(e)) }
 // waitInboxTimeoutExit is wait-inbox's status when the timeout passes with no
 // unread mail, distinct from 1 (error) so shell watchers can tell them apart.
 const waitInboxTimeoutExit = exitCode(2)
+
+// waitInboxPidExit is wait-inbox's status when the --pid process exited first.
+const waitInboxPidExit = exitCode(3)
 
 func inboxFlags(name string) (*flag.FlagSet, *string) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -77,6 +82,20 @@ func inboxCommand(args []string, w io.Writer) error {
 	return nil
 }
 
+// processAlive reports whether pid exists; EPERM still means it exists. An
+// exited child of the caller's shell stays a zombie until reaped, so a zombie
+// counts as exited.
+func processAlive(pid int) bool {
+	if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+		return false
+	}
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	return !strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
+}
+
 // parseTimeout accepts whole seconds ("600") or a Go duration ("10m").
 func parseTimeout(s string) (time.Duration, error) {
 	if n, err := strconv.Atoi(s); err == nil && n >= 0 {
@@ -94,6 +113,7 @@ func parseTimeout(s string) (time.Duration, error) {
 func waitInboxCommand(args []string, w io.Writer) error {
 	fs, session := inboxFlags("wait-inbox")
 	timeout := fs.String("timeout", "0", "give up after this many seconds or this duration (0 waits forever)")
+	pid := fs.Int("pid", 0, "also return (exit 3) when this process exits, e.g. a job watcher started with &")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -112,7 +132,16 @@ func waitInboxCommand(args []string, w io.Writer) error {
 		ctx, cancel = context.WithTimeout(ctx, d)
 		defer cancel()
 	}
-	n, err := channel.WaitInbox(ctx, runtime, *session, channel.InboxPoll)
+	var alive func() bool
+	if *pid > 0 {
+		p := *pid
+		alive = func() bool { return processAlive(p) }
+	}
+	n, err := channel.WaitInbox(ctx, runtime, *session, channel.InboxPoll, alive)
+	if errors.Is(err, channel.ErrWatchedExited) {
+		fmt.Fprintf(w, "rhizome wait-inbox: process %d exited; no unread messages for %s\n", *pid, *session)
+		return waitInboxPidExit
+	}
 	if errors.Is(err, channel.ErrInboxTimeout) {
 		fmt.Fprintf(w, "rhizome wait-inbox: no unread messages for %s after %s\n", *session, d)
 		return waitInboxTimeoutExit

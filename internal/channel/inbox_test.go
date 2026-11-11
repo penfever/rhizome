@@ -89,12 +89,12 @@ func TestWaitInbox(t *testing.T) {
 	runtime := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	if _, err := WaitInbox(ctx, runtime, "s1", 10*time.Millisecond); !errors.Is(err, ErrInboxTimeout) {
+	if _, err := WaitInbox(ctx, runtime, "s1", 10*time.Millisecond, nil); !errors.Is(err, ErrInboxTimeout) {
 		t.Fatalf("empty inbox: %v", err)
 	}
 	done := make(chan int, 1)
 	go func() {
-		n, err := WaitInbox(context.Background(), runtime, "s1", 10*time.Millisecond)
+		n, err := WaitInbox(context.Background(), runtime, "s1", 10*time.Millisecond, nil)
 		if err != nil {
 			t.Error(err)
 		}
@@ -113,7 +113,7 @@ func TestWaitInbox(t *testing.T) {
 		t.Fatal("wait-inbox did not wake on new mail")
 	}
 	// Unread mail present at start returns at once; read mail does not.
-	if n, err := WaitInbox(context.Background(), runtime, "s1", time.Hour); err != nil || n != 1 {
+	if n, err := WaitInbox(context.Background(), runtime, "s1", time.Hour, nil); err != nil || n != 1 {
 		t.Fatalf("unread at start: %d %v", n, err)
 	}
 	if _, err := ReadInbox(runtime, "s1", false, true); err != nil {
@@ -121,7 +121,7 @@ func TestWaitInbox(t *testing.T) {
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := WaitInbox(ctx, runtime, "s1", 10*time.Millisecond); !errors.Is(err, ErrInboxTimeout) {
+	if _, err := WaitInbox(ctx, runtime, "s1", 10*time.Millisecond, nil); !errors.Is(err, ErrInboxTimeout) {
 		t.Fatalf("read inbox: %v", err)
 	}
 }
@@ -154,5 +154,13 @@ func TestInboxRejectsPathSessionIDs(t *testing.T) {
 		if _, err := ReadInbox(t.TempDir(), s, false, false); err == nil {
 			t.Errorf("%q accepted", s)
 		}
+	}
+}
+
+func TestWaitInboxWatchedProcessExit(t *testing.T) {
+	calls := 0
+	alive := func() bool { calls++; return calls < 3 }
+	if _, err := WaitInbox(context.Background(), t.TempDir(), "s1", time.Millisecond, alive); !errors.Is(err, ErrWatchedExited) {
+		t.Fatalf("got %v", err)
 	}
 }
