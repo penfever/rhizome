@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -23,6 +24,10 @@ import (
 
 func main() {
 	if err := entry(); err != nil {
+		var code exitCode
+		if errors.As(err, &code) {
+			os.Exit(int(code))
+		}
 		log.Print(err)
 		os.Exit(1)
 	}
@@ -30,7 +35,7 @@ func main() {
 
 func entry() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: rhizome --version | mcp | setup | uninstall | service | update | config | token | files | invite | join | peers | demo [flags]")
+		return fmt.Errorf("usage: rhizome --version | mcp | setup | uninstall | service | update | config | token | files | inbox | wait-inbox | invite | join | peers | demo [flags]")
 	}
 	mode := os.Args[1]
 	if mode == "--version" || mode == "-version" {
@@ -52,7 +57,7 @@ func entry() error {
 	case "mcp":
 		opts := flag.NewFlagSet("mcp", flag.ContinueOnError)
 		agent := opts.String("agent", "claude", "delivery agent: claude, codex, opencode or pi")
-		config.Bind(opts, "codex-bin", "codex-delivery", "claude-delivery", "debug")
+		config.Bind(opts, "codex-bin", "codex-delivery", "claude-delivery", "opencode-delivery", "debug")
 		o, err := optionsFromEnv()
 		if err != nil {
 			return err
@@ -119,6 +124,10 @@ func entry() error {
 		return c.Write(os.Stdout)
 	case "files":
 		return filesCommand(os.Args[1:])
+	case "inbox":
+		return inboxCommand(os.Args[1:], os.Stdout)
+	case "wait-inbox":
+		return waitInboxCommand(os.Args[1:], os.Stdout)
 	case "invite", "join", "peers":
 		return gatewayCommand(mode, os.Args[1:])
 	case "service":

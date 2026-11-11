@@ -187,7 +187,7 @@ func TestBridgeDeliverOutcomes(t *testing.T) {
 	b, h, path := startBridge(t)
 	b.ackTimeout = 200 * time.Millisecond
 	ctx := context.Background()
-	if err := b.deliver(ctx, "ses_a", "x"); !errors.Is(err, errDestinationUnavailable) {
+	if err := b.deliver(ctx, "ses_a", "x", ""); !errors.Is(err, errDestinationUnavailable) {
 		t.Fatalf("no plugin: %v", err)
 	}
 	p := dialPlugin(t, path, true)
@@ -201,7 +201,7 @@ func TestBridgeDeliverOutcomes(t *testing.T) {
 		{"", func(err error) bool { return errors.Is(err, errAckMissing) }},
 	} {
 		done := make(chan error, 1)
-		go func() { done <- b.deliver(ctx, "ses_a", "payload") }()
+		go func() { done <- b.deliver(ctx, "ses_a", "payload", "") }()
 		f, ok := p.read(t)
 		if !ok || f.Type != "deliver" || f.SessionID != "ses_a" || f.Text != "payload" || f.ID == "" {
 			t.Fatalf("deliver frame %+v %v", f, ok)
@@ -212,6 +212,17 @@ func TestBridgeDeliverOutcomes(t *testing.T) {
 		if err := recv(t, done); !tc.check(err) {
 			t.Fatalf("reply %q: %v", tc.reply, err)
 		}
+	}
+	// opencode.delivery = "steer" travels on the frame for the plugin to apply.
+	done := make(chan error, 1)
+	go func() { done <- b.deliver(ctx, "ses_a", "payload", "steer") }()
+	f, ok := p.read(t)
+	if !ok || f.Type != "deliver" || f.Delivery != "steer" {
+		t.Fatalf("steer frame %+v %v", f, ok)
+	}
+	p.send(t, bridgeFrame{Type: "ack", ID: f.ID})
+	if err := recv(t, done); err != nil {
+		t.Fatal(err)
 	}
 }
 

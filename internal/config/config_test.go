@@ -25,7 +25,7 @@ func TestLayers(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var schema Config
 	for _, s := range schema.settings() {
-		if strings.HasPrefix(s.key, "gateway.") || s.key == "claude.delivery" || s.key == "codex.delivery" {
+		if strings.HasPrefix(s.key, "gateway.") || s.key == "claude.delivery" || s.key == "codex.delivery" || s.key == "opencode.delivery" {
 			continue
 		} // constrained values have dedicated precedence tests
 		t.Run(s.key, func(t *testing.T) {
@@ -82,6 +82,7 @@ func TestInvalidFiles(t *testing.T) {
 		{"claude.projects_dir = '/same'\ncodex.sessions_dir = '/same'", "claude.projects_dir"},
 		{"claude.delivery = 'push'", "claude.delivery"},
 		{"codex.delivery = 'push'", "codex.delivery"},
+		{"[opencode]\ndelivery = 'interrupt'", "opencode.delivery"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {
@@ -385,5 +386,20 @@ func TestCodexDelivery(t *testing.T) {
 	}
 	if c, err = Resolve(map[string]string{"config": fixture(t, "")}, env); err != nil || c.Codex.Delivery != CodexDeliverySteer {
 		t.Fatalf("env: %q %v", c.Codex.Delivery, err)
+	}
+}
+
+func TestOpenCodeDelivery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c, err := Resolve(map[string]string{"config": fixture(t, "")}, noenv)
+	if err != nil || c.OpenCode.Delivery != OpenCodeDeliveryQueue || c.Sources["opencode.delivery"] != "default" {
+		t.Fatalf("default: %q %v", c.OpenCode.Delivery, err)
+	}
+	p := fixture(t, "[opencode]\ndelivery = 'steer'")
+	if c, err = Resolve(map[string]string{"config": p}, noenv); err != nil || c.OpenCode.Delivery != OpenCodeDeliverySteer {
+		t.Fatalf("file: %q %v", c.OpenCode.Delivery, err)
+	}
+	if c, err = Resolve(map[string]string{"config": p, "opencode-delivery": "queue"}, noenv); err != nil || c.OpenCode.Delivery != OpenCodeDeliveryQueue {
+		t.Fatalf("flag override: %q %v", c.OpenCode.Delivery, err)
 	}
 }

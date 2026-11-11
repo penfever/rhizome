@@ -215,6 +215,14 @@ func (c *codexCollector) scan(ctx context.Context, n *Node, gen uint64) bool {
 	}
 	n.setNativeTitle(gen, true, title)
 	status := read.Thread.Status.Type
+	if status == codexNotLoaded && n.codexCLIOwned() {
+		// A standalone Codex CLI runs its own in-process App Server, so the
+		// managed daemon reports the CLI's threads as notLoaded. Activity cannot
+		// be collected through the daemon, but delivery can: the daemon's queue
+		// store is shared with the CLI, which starts a turn from it.
+		c.state(n, codexCLIOwnedState, true)
+		return false
+	}
 	if status != "idle" && status != "active" {
 		c.state(n, status, false)
 		return false

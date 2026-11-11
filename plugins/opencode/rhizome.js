@@ -1,6 +1,6 @@
 // Rhizome plugin for OpenCode 2.x. It relays a fixed allowlist of session
 // events to the local Rhizome MCP process over a private Unix socket and
-// executes Rhizome's deliveries as queued synthetic messages. Every filtering,
+// executes Rhizome's deliveries as queued or steered synthetic messages. Every filtering,
 // identity and routing decision lives in Rhizome; this plugin never decides.
 import { createConnection } from "node:net"
 import { createHash } from "node:crypto"
@@ -96,7 +96,10 @@ export default {
 
     const deliver = async (frame) => {
       try {
-        await ctx.session.synthetic({ sessionID: frame.sessionID, text: frame.text, delivery: "queue" })
+        // "steer" (opencode.delivery) reaches a running turn at its next model
+        // step; "queue" waits for the turn to end. Older Rhizome omits it.
+        const delivery = frame.delivery === "steer" ? "steer" : "queue"
+        await ctx.session.synthetic({ sessionID: frame.sessionID, text: frame.text, delivery })
         reply({ type: "ack", id: frame.id })
       } catch (error) {
         reply({ type: "fail", id: frame.id, reason: String(error?.message ?? error).slice(0, 200) })

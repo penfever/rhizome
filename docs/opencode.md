@@ -132,8 +132,13 @@ limits and the circuit breaker apply unchanged.
 
 ## Delivery
 
-Events are delivered with `ctx.session.synthetic` and `delivery: "queue"`. This
-wakes an idle session but never interrupts a running turn. Deliveries use the same
+Events are delivered with `ctx.session.synthetic`. With `opencode.delivery =
+"queue"` (default) this wakes an idle session but holds the item in OpenCode's
+session inbox until the running turn ends, which in a long agentic turn can be
+an hour or more while `send` reports accepted. With `opencode.delivery =
+"steer"` the item is steered into the running turn and the model reads it at
+its next step, as with a prompt typed mid-turn. Rhizome sends the mode on each
+`deliver` frame; plugins that predate it always queue. Deliveries use the same
 untrusted-peer envelope as Codex and are never republished.
 
 - No connected plugin: nothing is written and events are retained in the bounded

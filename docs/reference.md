@@ -28,6 +28,7 @@ the table for diagnostics; `setup --hostname` only writes the file. All startup 
 | `claude.delivery` | `RHIZOME_CLAUDE_DELIVERY` | mcp `--claude-delivery` | `channel`; `hooks` delivers through hook `additionalContext` (see [Claude delivery](#claude-delivery)) |
 | `codex.bin` | — | mcp `--codex-bin` | `codex` |
 | `codex.delivery` | `RHIZOME_CODEX_DELIVERY` | mcp `--codex-delivery` | `queue`; `steer` injects into a running turn (see [Codex delivery](codex.md)) |
+| `opencode.delivery` | `RHIZOME_OPENCODE_DELIVERY` | mcp `--opencode-delivery` | `queue` waits for the running turn to end; `steer` delivers at its next model step (see [OpenCode delivery](opencode.md#delivery)) |
 | `codex.home` | `CODEX_HOME` | — | `~/.codex` |
 | `codex.sessions_dir` | — | service `--codex-root` | effective `codex.home` + `/sessions` |
 | `opencode.data_dir` | — | service `--opencode-root` | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` |
@@ -295,8 +296,8 @@ retains events. `list_sessions` reports `claude_delivery` and
 | `subscribe(session_id)` | Follow an exact ID. Idempotent; retains intent while absent. Explicitly re-arms that origin if delivery is paused. |
 | `unsubscribe(session_id)` | Cancel follow and remove pending activity from that subscription. Direct messages are independent. |
 | `publish(text, reply_to?)` | Announce to current subscribers. |
-| `send(session_id, text, reply_to?)` | Direct message without a subscription. Returns a stable message ID and receiver queue acceptance. |
-| `delivery_status(session_id, agent_type, message_id)` | Whether a sent message has reached the receiving agent on this device: `in_transcript` (with `recorded_at` when the line has a timestamp) once its envelope is in the receiver's native log, else `not_in_transcript`. Scans at most the last 128 MiB of the log. Requires the observer service's catalog. |
+| `send(session_id, text, reply_to?)` | Direct message without a subscription. Returns a stable message ID, receiver queue acceptance and `receiver_delivery`, the receiver gateway's account of what happens next (for example "held: receiver's delivery path is not ready (notLoaded)"). |
+| `delivery_status(session_id, agent_type, message_id)` | Whether a sent message has reached the receiving agent on this device: `in_transcript` (with `recorded_at` when the line has a timestamp) once its envelope is in the receiver's native log, else `not_in_transcript`. Scans at most the last 128 MiB of the log. Adds `inbox: unread` or `inbox: read` when the message is in the receiver's [durable inbox](#durable-inbox). Requires the observer service's catalog. |
 | `observe_session(...)` | Internal hook binding/refresh and transcript wake-up. Not offered in OpenCode mode. |
 | `send_file`, `list_files`, `accept_file`, `cancel_file` | Explicit file offers between sessions on paired hosts; see [file transfers](files.md). |
 | `search_sessions(filters…, host_id?)` | Metadata search of the local history catalog by exact ID, agent, project path, title substring, and activity date, with deterministic pagination. Rows carry history availability and current live status separately. Requires the observer service's catalog. With `host_id`, searches one directly paired host that opted in. |
@@ -312,6 +313,28 @@ integrations take precedence over passive observers of the same session. Multipl
 direct nodes with one session ID are listed as one `live` row with
 `delivery_capable: false`; routing still fails closed on them. List results
 are gossip snapshots; routing verifies identities over authenticated gRPC.
+
+## Durable inbox
+
+Every direct message and announcement accepted for a session is also appended,
+with its full text, to `<runtime_dir>/inbox/<session_id>.jsonl` (default
+`~/.rhizome/run/inbox`, files 0600) by the process serving that session. The
+log is never consumed by delivery, so an agent that cannot receive through its
+native path (inside a long blocking tool call, or behind a turn that does not
+end) can still read its mail:
+
+- `rhizome inbox --session <id> [--all] [--peek] [--json]` prints unread
+  messages, framed as untrusted peer content, and marks them read
+  (`<session_id>.cursor`). `--all` prints every message; `--peek` leaves the
+  cursor alone.
+- `rhizome wait-inbox --session <id> [--timeout <seconds|duration>]` exits 0 as
+  soon as the session has unread mail (immediately if some is already unread)
+  and 2 when the timeout passes; 0 waits forever. It polls every 500 ms and is
+  meant to run beside a long wait, for example
+  `wait_for_job.sh & rhizome wait-inbox --session "$SID" --timeout 3600 & wait -n`.
+
+Activity feed events are not written. A message reaches the inbox even when the
+native queue is full.
 
 ## Session names
 

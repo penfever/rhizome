@@ -61,6 +61,7 @@ type openCodeNodes struct {
 	peerActivity config.PeerActivityPolicy
 	details      bool // [sessions].share_prompts_and_tools
 	debug        bool
+	delivery     string  // opencode.delivery: "queue" or "steer"
 	opts         Options // network and hostname settings shared by every session node
 	bridge       *bridge
 	store        *openCodeStore // nil disables restoration (tests)
@@ -533,7 +534,7 @@ func (m *openCodeNodes) newSessionNode(sid string) (*Node, error) {
 		if m.bridge == nil {
 			return errDestinationUnavailable
 		}
-		return m.bridge.deliver(ctx, sid, peerEnvelope(text, meta))
+		return m.bridge.deliver(ctx, sid, peerEnvelope(text, meta), m.delivery)
 	}
 	o := m.opts
 	o.Runtime = m.runtime
@@ -728,6 +729,8 @@ func RunOpenCode(c config.Config, o Options) error {
 	manager.details = c.Sessions.SharePromptsAndTools
 	manager.peerActivity = c.Sessions.SharePeerTriggeredActivity
 	manager.debug = c.Debug
+	manager.delivery = c.OpenCode.Delivery
+	slog.Info("opencode_delivery", "path", c.OpenCode.Delivery)
 	manager.opts = o
 	manager.store = store
 	b, err := listenBridge(path, manager)

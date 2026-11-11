@@ -227,7 +227,7 @@ func (s *piSession) newNode(sid string) (*Node, error) {
 		if s.bridge == nil {
 			return errDestinationUnavailable
 		}
-		return s.bridge.deliver(ctx, sid, peerEnvelope(text, meta))
+		return s.bridge.deliver(ctx, sid, peerEnvelope(text, meta), "")
 	}
 	o := s.opts
 	o.Runtime = s.runtime

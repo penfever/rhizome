@@ -40,7 +40,7 @@ func codexOutboxNode(t *testing.T, steer bool, f *fakeCodex) (*Node, *queueRecor
 	n.identity.Generation = 1
 	n.codex = newCodexCollector(threadA, f)
 	q := &queueRecorder{}
-	n.codexOut = newCodexOutbox(steer, q.queue)
+	n.codexOut = newCodexOutbox(steer, nil, q.queue)
 	return n, q
 }
 

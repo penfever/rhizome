@@ -165,8 +165,19 @@ them over as one message, each event keeping its own envelope:
   steer (compaction, review, a turn that just ended) is retried every two
   seconds. After a minute of failures the events are queued instead.
 
-App Server `notLoaded`, `systemError`, a disconnected reader, or unavailable
-history keeps events held. A queue command that exits with an error keeps them
+- **Thread owned by a standalone `codex` CLI:** the CLI runs its own
+  in-process App Server, so the managed daemon reports its threads as
+  `notLoaded`. When the gateway's parent process is a live standalone Codex CLI
+  (not `codex app-server`), such a thread is deliverable: events are handed to
+  `codex queue` through the daemon, whose queue store the CLI shares, and the
+  CLI starts a turn from it (immediately when idle, otherwise when the running
+  turn ends). Steering is not possible, activity is not collected, and
+  handoffs are spaced at least 30 s apart so a burst becomes one turn.
+  `collection_state` reads "notLoaded in the App Server daemon; thread owned
+  by the Codex CLI …".
+
+`notLoaded` without a live owning CLI, `systemError`, a disconnected reader, or
+unavailable history keeps events held. A queue command that exits with an error keeps them
 for retry. One that times out or is killed may already have queued the
 message, so it is not retried; `list_sessions` reports it under
 `codex_outbox.uncertain`. A successful handoff is not a promise that a model

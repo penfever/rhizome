@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"rhizome/internal/config"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,6 +71,9 @@ type codexNodes struct {
 	details        bool // [sessions].share_prompts_and_tools
 	debug          bool
 	steer          bool // codex.delivery = "steer"
+	// cliOwned reports whether the parent process is a live standalone Codex
+	// CLI rather than the App Server daemon; see codexCLIParent.
+	cliOwned func() bool
 }
 
 func (m *codexNodes) resolve(r *mcp.CallToolRequest) (*Node, error) {
@@ -95,7 +100,7 @@ func (m *codexNodes) resolve(r *mcp.CallToolRequest) (*Node, error) {
 	n.debug = m.debug
 	n.collectionState = "waiting for session hook"
 	n.codex = newCodexCollector(thread, &appReader{socket: m.socket})
-	n.codexOut = newCodexOutbox(m.steer, func(ctx context.Context, message string) error {
+	n.codexOut = newCodexOutbox(m.steer, m.cliOwned, func(ctx context.Context, message string) error {
 		return queueCodex(ctx, m.binary, m.socket, thread, message)
 	})
 	n.notify = n.holdForCodex
@@ -215,6 +220,27 @@ func (w *limitedCapture) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// codexCLIParent returns a check that the gateway's parent, pid, is still a
+// live standalone Codex CLI. The parent's command line is read once: a gateway
+// started by the App Server daemon ("codex app-server ...") never qualifies.
+// The check fails closed when the command line cannot be read.
+func codexCLIParent(pid int) func() bool {
+	out, err := exec.Command("ps", "-o", "args=", "-p", strconv.Itoa(pid)).Output()
+	cli := err == nil && pid > 1 && isCodexCLICommand(string(out))
+	slog.Info("codex_parent", "pid", pid, "standalone_cli", cli)
+	return func() bool { return cli && os.Getppid() == pid }
+}
+
+// isCodexCLICommand reports whether args is a Codex executable not running as
+// the App Server.
+func isCodexCLICommand(args string) bool {
+	fields := strings.Fields(args)
+	if len(fields) == 0 || !strings.HasPrefix(filepath.Base(fields[0]), "codex") {
+		return false
+	}
+	return !slices.Contains(fields[1:], "app-server")
+}
+
 // queueCodex queues message, already wrapped in peer envelopes, as one item.
 func queueCodex(ctx context.Context, binary, socket, thread, message string) error {
 	if !filepath.IsAbs(binary) || !filepath.IsAbs(socket) || !threadUUID.MatchString(thread) {
@@ -258,7 +284,7 @@ func RunCodex(c config.Config, o Options) error {
 	history := newHistoryService(historyScope{Runtime: c.RuntimeDir, ClaudeRoot: c.Claude.ProjectsDir, CodexRoot: c.Codex.SessionsDir, OpenCodeRoot: c.OpenCode.DataDir, PiRoot: c.Pi.SessionsDir})
 	history.details = c.Sessions.SharePromptsAndTools
 	history.peerActivity = c.Sessions.SharePeerTriggeredActivity
-	manager := &codexNodes{ctx: ctx, nodes: map[string]*Node{}, binary: resolved, socket: filepath.Join(home, "app-server-control", "app-server-control.sock"), opts: o, history: history, recentWindow: c.RecentWindow, details: c.Sessions.SharePromptsAndTools, peerActivity: c.Sessions.SharePeerTriggeredActivity, debug: c.Debug, steer: c.Codex.Delivery == config.CodexDeliverySteer}
+	manager := &codexNodes{ctx: ctx, nodes: map[string]*Node{}, binary: resolved, socket: filepath.Join(home, "app-server-control", "app-server-control.sock"), opts: o, history: history, recentWindow: c.RecentWindow, details: c.Sessions.SharePromptsAndTools, peerActivity: c.Sessions.SharePeerTriggeredActivity, debug: c.Debug, steer: c.Codex.Delivery == config.CodexDeliverySteer, cliOwned: codexCLIParent(os.Getppid())}
 	slog.Info("codex_delivery", "path", c.Codex.Delivery)
 	defer manager.close()
 	server := makeServer(manager.resolve, agentCodex, func() {}, history)

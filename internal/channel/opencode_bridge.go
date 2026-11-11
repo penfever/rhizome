@@ -50,6 +50,10 @@ type bridgeFrame struct {
 	Nonce string `json:"nonce,omitempty"`
 	// Sessions is the restore list Rhizome sends after hello (type "restore").
 	Sessions []string `json:"sessions,omitempty"`
+	// Delivery is the OpenCode inbox delivery for a "deliver" frame: "queue"
+	// (after the running turn) or "steer" (at its next model step). Plugins
+	// that predate it always queue.
+	Delivery string `json:"delivery,omitempty"`
 }
 
 // bridgeHandler receives plugin traffic. Calls run on the connection's read
@@ -285,7 +289,7 @@ func (b *bridge) send(f bridgeFrame) error {
 // errDestinationUnavailable (retained by the caller); a sent but unacknowledged
 // delivery is errAckMissing (never retried). A failed write means nothing
 // reached OpenCode, so it is errDestinationUnavailable (retained).
-func (b *bridge) deliver(ctx context.Context, sessionID, text string) error {
+func (b *bridge) deliver(ctx context.Context, sessionID, text, delivery string) error {
 	msgID := id()
 	ch := make(chan bridgeFrame, 1)
 	b.mu.Lock()
@@ -297,7 +301,7 @@ func (b *bridge) deliver(ctx context.Context, sessionID, text string) error {
 	b.pending[msgID] = ch
 	b.mu.Unlock()
 	defer func() { b.mu.Lock(); delete(b.pending, msgID); b.mu.Unlock() }()
-	if err := b.write(c, bridgeFrame{Type: "deliver", ID: msgID, SessionID: sessionID, Text: text}); err != nil {
+	if err := b.write(c, bridgeFrame{Type: "deliver", ID: msgID, SessionID: sessionID, Text: text, Delivery: delivery}); err != nil {
 		c.Close()
 		return errDestinationUnavailable
 	}

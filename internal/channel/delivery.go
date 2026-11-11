@@ -49,6 +49,14 @@ func (n *Node) enqueueLocked(e *pb.Event, subscription, token string, generation
 	if n.seen[key] {
 		return true
 	}
+	// The durable inbox copy is written before the bounded queue check, so mail
+	// stays readable through `rhizome inbox` even when native delivery is full
+	// or stuck. A write failure is logged and must not refuse the message.
+	if inboxKind(e.Kind) && n.runtime != "" {
+		if err := appendInbox(n.runtime, n.identity.SessionId, inboxRecord(e, time.Now())); err != nil {
+			slog.Warn("inbox_append", "session_id", n.identity.SessionId, "error", err)
+		}
+	}
 	if len(n.incoming) >= maxQueue {
 		n.stats.Dropped++
 		return false

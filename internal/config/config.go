@@ -48,7 +48,11 @@ type Config struct {
 		Delivery string `toml:"delivery"`
 	} `toml:"codex"`
 	OpenCode struct {
-		DataDir     string      `toml:"data_dir"`     // Directory holding opencode.db; default $XDG_DATA_HOME/opencode or ~/.local/share/opencode.
+		DataDir string `toml:"data_dir"` // Directory holding opencode.db; default $XDG_DATA_HOME/opencode or ~/.local/share/opencode.
+		// Delivery selects how the plugin hands peer events to a session:
+		// "queue" holds them until the running turn ends; "steer" injects them
+		// at the running turn's next model step.
+		Delivery    string      `toml:"delivery"`
 		PeerHistory PeerHistory `toml:"peer_history"` // Override of gateway.history for OpenCode-sourced history.
 	} `toml:"opencode"`
 	Pi struct {
@@ -128,6 +132,12 @@ const (
 	CodexDeliverySteer = "steer"
 )
 
+// OpenCode delivery paths for opencode.delivery.
+const (
+	OpenCodeDeliveryQueue = "queue"
+	OpenCodeDeliverySteer = "steer"
+)
+
 type setting struct {
 	key, env, flag string
 	value          *string
@@ -149,6 +159,7 @@ func (c *Config) settings() []setting {
 		{"codex.home", "CODEX_HOME", "", &c.Codex.Home, true},
 		{"codex.sessions_dir", "", "codex-root", &c.Codex.SessionsDir, true},
 		{"opencode.data_dir", "", "opencode-root", &c.OpenCode.DataDir, true},
+		{"opencode.delivery", "RHIZOME_OPENCODE_DELIVERY", "opencode-delivery", &c.OpenCode.Delivery, false},
 		{"pi.sessions_dir", "", "pi-root", &c.Pi.SessionsDir, true},
 	}
 }
@@ -407,6 +418,8 @@ func resolveDocument(c Config, home string, file []byte, flags map[string]string
 				*s.value = ClaudeDeliveryChannel
 			case "codex.delivery":
 				*s.value = CodexDeliveryQueue
+			case "opencode.delivery":
+				*s.value = OpenCodeDeliveryQueue
 			case "codex.sessions_dir":
 				*s.value = filepath.Join(c.Codex.Home, "sessions")
 			case "opencode.data_dir", "pi.sessions_dir":
@@ -435,6 +448,9 @@ func resolveDocument(c Config, home string, file []byte, flags map[string]string
 	}
 	if c.Codex.Delivery != CodexDeliveryQueue && c.Codex.Delivery != CodexDeliverySteer {
 		return c, fmt.Errorf("config %s: codex.delivery must be %q or %q (%s)", path, CodexDeliveryQueue, CodexDeliverySteer, c.Sources["codex.delivery"])
+	}
+	if c.OpenCode.Delivery != OpenCodeDeliveryQueue && c.OpenCode.Delivery != OpenCodeDeliverySteer {
+		return c, fmt.Errorf("config %s: opencode.delivery must be %q or %q (%s)", path, OpenCodeDeliveryQueue, OpenCodeDeliverySteer, c.Sources["opencode.delivery"])
 	}
 	if err := c.Gateway.Validate(); err != nil {
 		return c, err

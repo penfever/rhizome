@@ -55,6 +55,11 @@ func (h *historyService) deliveryStatus(ctx context.Context, in deliveryStatusIn
 		return nil, herr("HISTORY_UNAVAILABLE", "the native log could not be read", true)
 	}
 	out := map[string]any{"message_id": in.MessageID, "session_id": in.SessionID, "scanned_bytes": scanned}
+	// The receiver's durable inbox shows acceptance on this device even while
+	// native delivery holds the message, and whether the agent has read it.
+	if st := inboxState(h.scope.Runtime, in.SessionID, in.MessageID); st != "" {
+		out["inbox"] = st
+	}
 	if found {
 		out["state"] = "in_transcript"
 		if at != "" {
@@ -63,7 +68,7 @@ func (h *historyService) deliveryStatus(ctx context.Context, in deliveryStatusIn
 		return out, nil
 	}
 	out["state"] = "not_in_transcript"
-	out["hint"] = "accepted but not yet seen by the receiving agent; the receiver's list_sessions codex_outbox or hook_queue_depth shows held events. Codex queue items are read only when a turn starts."
+	out["hint"] = "accepted but not yet seen by the receiving agent through native delivery; the receiver's list_sessions codex_outbox or hook_queue_depth shows held events. Codex and OpenCode queue items are read only when a turn starts. inbox=read means the agent read it with `rhizome inbox`."
 	return out, nil
 }
 

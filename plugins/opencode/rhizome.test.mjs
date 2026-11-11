@@ -110,7 +110,7 @@ test("hello, binding, inputs, text, tools, turn and title", async () => {
   cleanup(); await srv.stop()
 })
 
-test("deliveries are executed as queued synthetic messages and acknowledged", async () => {
+test("deliveries are executed as queued or steered synthetic messages and acknowledged", async () => {
   const srv = listen(); await srv.start()
   const ok = fakeCtx()
   const cleanup = plugin.setup(ok.ctx)
@@ -118,6 +118,14 @@ test("deliveries are executed as queued synthetic messages and acknowledged", as
   srv.write({ type: "deliver", id: "d1", sessionID: "ses_a", text: "peer" })
   assert.deepEqual(await srv.next((f) => f.type === "ack"), { type: "ack", id: "d1" })
   assert.deepEqual(ok.calls.synthetic[0], { sessionID: "ses_a", text: "peer", delivery: "queue" })
+  // opencode.delivery = "steer" reaches a running turn at its next step.
+  srv.write({ type: "deliver", id: "d3", sessionID: "ses_a", text: "now", delivery: "steer" })
+  assert.deepEqual(await srv.next((f) => f.type === "ack"), { type: "ack", id: "d3" })
+  assert.deepEqual(ok.calls.synthetic[1], { sessionID: "ses_a", text: "now", delivery: "steer" })
+  // Anything else falls back to the queue.
+  srv.write({ type: "deliver", id: "d4", sessionID: "ses_a", text: "odd", delivery: "interrupt" })
+  assert.deepEqual(await srv.next((f) => f.type === "ack"), { type: "ack", id: "d4" })
+  assert.equal(ok.calls.synthetic[2].delivery, "queue")
   cleanup(); await srv.stop()
   const srv2 = listen(); await srv2.start()
   const bad = fakeCtx({ synthetic: async () => { throw new Error("session gone") } })

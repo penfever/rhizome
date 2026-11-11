@@ -273,12 +273,12 @@ func makeServer(resolve func(*mcp.CallToolRequest) (*Node, error), kind agentKin
 		}
 		return result(n.renameSession(history, in.SessionID, in.Name))
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "send", Description: "Send text to an exact live session_id; success means accepted in receiver's bounded queue, not read. Use delivery_status with the returned message_id to confirm the receiver has it. Recent-only sessions are refused without queueing."}, func(ctx context.Context, r *mcp.CallToolRequest, in sendInput) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "send", Description: "Send text to an exact live session_id; success means accepted in receiver's bounded queue, not read. receiver_delivery says whether the receiver's gateway is holding it. Use delivery_status with the returned message_id to confirm the receiver has it. Recent-only sessions are refused without queueing."}, func(ctx context.Context, r *mcp.CallToolRequest, in sendInput) (*mcp.CallToolResult, any, error) {
 		n, resolveErr := resolve(r)
 		if resolveErr != nil {
 			return result(nil, resolveErr)
 		}
-		accepted, err := n.send(ctx, in.SessionID, in.Text, in.ReplyTo)
+		accepted, err := n.sendDetailed(ctx, in.SessionID, in.Text, in.ReplyTo)
 		return result(accepted, err)
 	})
 	if history != nil {

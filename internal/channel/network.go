@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	pb "rhizome/proto"
@@ -125,9 +127,54 @@ func (n *Node) Send(ctx context.Context, req *pb.SendRequest) (*pb.Acceptance, e
 	if !n.enqueueLocked(e, "", "", n.identity.Generation) {
 		return nil, status.Error(codes.ResourceExhausted, "receiver queue full")
 	}
+	// Older senders ignore the header; a failed header write only loses detail.
+	_ = grpc.SetHeader(ctx, metadata.Pairs(deliveryHeader, n.receiverDeliveryLocked()))
 	return &pb.Acceptance{Accepted: true, MessageId: e.MessageId}, nil
 }
+
+// deliveryHeader carries the receiver's delivery state with an acceptance.
+const deliveryHeader = "rhizome-receiver-delivery"
+
+// SendResult is the send tool's answer: acceptance plus what the receiver's
+// gateway will do with the message, so a held message is not mistaken for a
+// delivered one.
+type SendResult struct {
+	Accepted         bool   `json:"accepted"`
+	MessageID        string `json:"message_id"`
+	ReceiverDelivery string `json:"receiver_delivery,omitempty"`
+}
+
+// receiverDeliveryLocked describes how an event accepted now will reach the
+// agent. Requires n.mu.
+func (n *Node) receiverDeliveryLocked() string {
+	var state string
+	switch {
+	case n.external && !n.deliveryReady:
+		state = "held: receiver's delivery path is not ready (" + n.collectionState + ")"
+	case n.codexOut != nil && len(n.codexOut.held) > 0:
+		state = fmt.Sprintf("held in Codex outbox behind %d event(s): %s", len(n.codexOut.held), n.codexOut.state)
+	case n.codexOut != nil && n.collectionState == codexCLIOwnedState:
+		state = "queued for the owning Codex CLI; read when its next turn starts"
+	case n.hookDelivery:
+		state = "held for the receiver's next prompt or tool-call hook"
+	default:
+		state = "queued for delivery"
+	}
+	if n.runtime != "" {
+		state += "; also in the receiver's durable inbox (rhizome inbox / wait-inbox)"
+	}
+	return state
+}
+
 func (n *Node) send(ctx context.Context, session, text, reply string) (*pb.Acceptance, error) {
+	r, err := n.sendDetailed(ctx, session, text, reply)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.Acceptance{Accepted: r.Accepted, MessageId: r.MessageID}, nil
+}
+
+func (n *Node) sendDetailed(ctx context.Context, session, text, reply string) (*SendResult, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, errors.New("text must not be empty")
 	}
@@ -163,7 +210,16 @@ func (n *Node) send(ctx context.Context, session, text, reply string) (*pb.Accep
 	defer conn.Close()
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	return pb.NewChannelClient(conn).Send(n.outgoing(ctx), &pb.SendRequest{Target: target, Sender: sender, Event: e})
+	var header metadata.MD
+	a, err := pb.NewChannelClient(conn).Send(n.outgoing(ctx), &pb.SendRequest{Target: target, Sender: sender, Event: e}, grpc.Header(&header))
+	if err != nil {
+		return nil, err
+	}
+	r := &SendResult{Accepted: a.Accepted, MessageID: a.MessageId}
+	if v := header.Get(deliveryHeader); len(v) > 0 {
+		r.ReceiverDelivery = clip(v[0], 512)
+	}
+	return r, nil
 }
 func (n *Node) subscribe(session string) error {
 	n.gate.Lock()

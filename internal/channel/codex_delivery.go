@@ -30,6 +30,12 @@ const (
 	// approval prompts) before held events are queued for the next turn instead.
 	codexSteerFallback = time.Minute
 	codexUncertainKept = 32
+	// codexCLIQueueInterval spaces queue handoffs to a CLI-owned thread, whose
+	// turns the daemon cannot see: each handoff becomes one turn, so events
+	// arriving within the interval are coalesced into the next handoff.
+	codexCLIQueueInterval = 30 * time.Second
+	codexNotLoaded        = "notLoaded"
+	codexCLIOwnedState    = "notLoaded in the App Server daemon; thread owned by the Codex CLI that started this gateway, delivering through the shared queue"
 )
 
 type codexHeld struct {
@@ -63,10 +69,24 @@ type codexOutbox struct {
 	state      string
 	last       *codexHandoff
 	uncertain  []codexHandoff
+	// cliOwned reports whether this gateway was started by a live standalone
+	// Codex CLI (not the App Server daemon); only then does a notLoaded thread
+	// count as deliverable. cliQueuedAt is the last queue handoff to it.
+	cliOwned    func() bool
+	cliQueuedAt time.Time
 }
 
-func newCodexOutbox(steer bool, queue func(context.Context, string) error) *codexOutbox {
-	return &codexOutbox{steer: steer, queue: queue, wake: make(chan struct{}, 1), state: "empty"}
+func newCodexOutbox(steer bool, cliOwned func() bool, queue func(context.Context, string) error) *codexOutbox {
+	return &codexOutbox{steer: steer, cliOwned: cliOwned, queue: queue, wake: make(chan struct{}, 1), state: "empty"}
+}
+
+// codexCLIOwned reports whether a notLoaded thread is served by this gateway's
+// parent Codex CLI.
+func (n *Node) codexCLIOwned() bool {
+	n.mu.Lock()
+	o := n.codexOut
+	n.mu.Unlock()
+	return o != nil && o.cliOwned != nil && o.cliOwned()
 }
 
 func (o *codexOutbox) mode() string {
@@ -167,6 +187,17 @@ func (n *Node) flushCodex(ctx context.Context, thread string) {
 	case status == "idle":
 		turn = ""
 		err = o.queue(ctx, message)
+	case status == codexNotLoaded && n.codexCLIOwned():
+		turn = ""
+		n.mu.Lock()
+		wait := codexCLIQueueInterval - time.Since(o.cliQueuedAt)
+		n.mu.Unlock()
+		if wait > 0 {
+			n.holdCodex(fmt.Sprintf("%d held for the next queue handoff to the Codex CLI in %s", len(batch), wait.Round(time.Second)))
+			return
+		}
+		mode = "cli-queue"
+		err = o.queue(ctx, message)
 	case status != "active":
 		n.holdCodex(fmt.Sprintf("Codex thread status %q; %d held", status, len(batch)))
 		return
@@ -235,9 +266,13 @@ func (n *Node) finishCodex(batch []codexHeld, mode, turn string, err error) {
 		o.state = "last queue handoff has unknown acceptance and was not retried; see uncertain"
 	} else {
 		n.deliveryError = ""
-		if mode == "steer" {
+		switch mode {
+		case "steer":
 			n.stats.Steered += uint64(len(batch))
-		} else {
+		case "cli-queue":
+			n.stats.QueueHandoffs += uint64(len(batch))
+			o.cliQueuedAt = time.Now()
+		default:
 			n.stats.QueueHandoffs += uint64(len(batch))
 			o.queued, o.queuedTurn = true, turn
 		}
