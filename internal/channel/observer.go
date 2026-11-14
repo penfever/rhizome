@@ -40,11 +40,13 @@ type observedFile struct {
 	identityError              string
 }
 type observer struct {
-	ctx   context.Context
-	opts  ObserverOptions
-	watch *fsnotify.Watcher
-	files map[string]*observedFile
-	dirs  map[string]bool
+	ctx                 context.Context
+	opts                ObserverOptions
+	watch               *fsnotify.Watcher
+	files               map[string]*observedFile
+	dirs                map[string]bool
+	visibilityAck       string
+	visibilityPublished string
 	// evicted remembers logs dropped at the tracked-file cap so a later write
 	// re-baselines at EOF instead of replaying the whole file as new activity.
 	evicted map[string]bool
@@ -55,6 +57,10 @@ type observer struct {
 // RunObserver observes local log changes until cancellation. Only one observer
 // may run in a runtime scope. It never starts or modifies an agent.
 func RunObserver(ctx context.Context, opts ObserverOptions) error {
+	return runObserver(ctx, opts, 30*time.Second)
+}
+
+func runObserver(ctx context.Context, opts ObserverOptions, retryInterval time.Duration) error {
 	var err error
 	for _, root := range []*string{&opts.ClaudeRoot, &opts.CodexRoot, &opts.OpenCodeRoot, &opts.PiRoot} {
 		if *root != "" {
@@ -102,10 +108,16 @@ func RunObserver(ctx context.Context, opts ObserverOptions) error {
 		}
 		os.Remove(filepath.Join(opts.Runtime, "observer-health.json"))
 	}()
+	if err := localstate.SecureDir(filepath.Join(opts.Runtime, "visibility")); err != nil {
+		return err
+	}
+	if err := w.Add(filepath.Join(opts.Runtime, "visibility")); err != nil {
+		return err
+	}
 	o.inventory(true)
 	o.index.walkDone()
 	o.health()
-	tick := time.NewTicker(time.Second)
+	tick := time.NewTicker(min(time.Second, retryInterval))
 	defer tick.Stop()
 	lastRetry := time.Now()
 	for {
@@ -115,6 +127,10 @@ func RunObserver(ctx context.Context, opts ObserverOptions) error {
 		case event, ok := <-w.Events:
 			if !ok {
 				return errors.New("filesystem event channel closed")
+			}
+			if filepath.Dir(event.Name) == filepath.Join(opts.Runtime, "visibility") {
+				o.syncVisibility()
+				continue
 			}
 			if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 				for dir := range o.dirs {
@@ -155,9 +171,14 @@ func RunObserver(ctx context.Context, opts ObserverOptions) error {
 			}
 			o.watchFailed(err)
 		case <-tick.C:
-			if o.retry && time.Since(lastRetry) >= 30*time.Second {
-				o.retry = false
-				o.inventory(false)
+			o.syncVisibility()
+			if time.Since(lastRetry) >= retryInterval {
+				if o.retry {
+					o.retry = false
+					o.inventory(false)
+				} else {
+					o.retryRoots()
+				}
 				lastRetry = time.Now()
 			}
 			for path, f := range o.files {
@@ -229,19 +250,11 @@ func (o *observer) addOpenCodeRoot() {
 	if root == "" || o.index == nil {
 		return
 	}
-	for parent := filepath.Dir(root); ; {
-		if st, err := os.Stat(parent); err == nil && st.IsDir() {
-			o.addDir(parent) // nearest existing parent, so a missing root can appear later
-			break
-		}
-		next := filepath.Dir(parent)
-		if next == parent {
-			break
-		}
-		parent = next
-	}
+
 	if st, err := os.Lstat(root); err == nil && st.IsDir() {
-		o.addDir(root)
+		if !o.addDir(root) {
+			return
+		}
 	}
 	o.index.openCodeChanged()
 }
@@ -263,34 +276,68 @@ func (o *observer) openCodeEvent(name string) {
 	}
 }
 func (o *observer) addRoot(root string, initial bool) {
-	// Watch the nearest existing parent so missing roots can appear later.
-	parent := filepath.Dir(root)
-	for {
-		if st, err := os.Stat(parent); err == nil && st.IsDir() {
-			o.addDir(parent)
-			break
-		}
-		next := filepath.Dir(parent)
-		if next == parent {
-			break
-		}
-		parent = next
-	}
 	o.visit(root, initial)
 }
-func (o *observer) addDir(path string) {
+
+// retryRoots probes only unregistered roots (at most four Lstats when missing).
+// This is bounded missing-root discovery, not normal-path tree polling. A root
+// removed or renamed loses its watch in the event loop and is retried here too.
+func (o *observer) retryRoots() {
+	for _, root := range []string{o.opts.ClaudeRoot, o.opts.CodexRoot, o.opts.PiRoot} {
+		if root != "" && !o.dirs[root] {
+			o.addRoot(root, false)
+		}
+	}
+	if root := o.opts.OpenCodeRoot; root != "" && !o.dirs[root] {
+		o.addOpenCodeRoot()
+	}
+}
+
+// watchPathAllowed rejects home and its ancestors, including aliases through
+// symlinked parents. Fail closed when either existing path cannot be resolved.
+func watchPathAllowed(path string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		return false
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return false
+	}
+	path, err = filepath.Abs(path)
+	if err != nil || filepath.Dir(path) == path {
+		return false
+	}
+	rel, err := filepath.Rel(path, home)
+	return err == nil && (rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+func (o *observer) addDir(path string) bool {
 	if o.dirs[path] {
-		return
+		return true
+	}
+	if !watchPathAllowed(path) {
+		o.problem("watch path outside allowed scope")
+		return false
 	}
 	if len(o.dirs) >= 4096 {
 		o.problem("directory limit reached")
-		return
+		return false
 	}
 	if err := o.watch.Add(path); err != nil {
 		o.problem("watch registration failed")
-		return
+		return false
 	}
 	o.dirs[path] = true
+	return true
 }
 func (o *observer) problem(reason string) {
 	if !o.retry {
@@ -327,7 +374,9 @@ func (o *observer) visit(path string, initial bool) {
 			if d.Name() == "subagents" {
 				return filepath.SkipDir
 			}
-			o.addDir(path)
+			if !o.addDir(path) {
+				return filepath.SkipDir
+			}
 			if len(o.dirs) >= 4096 {
 				return filepath.SkipDir
 			}
@@ -534,6 +583,15 @@ func (o *observer) scan(path string, f *observedFile) {
 	}
 	f.session = session
 	f.cwd = cwd
+	if !sessionPublic(o.opts.Runtime, session) {
+		if f.n != nil {
+			f.n.close()
+			f.n = nil
+		}
+		f.c.privacyRevision = "private"
+		f.c.more = false
+		return
+	}
 
 	// Never open more than 64 observed publisher nodes per service.
 	if f.n == nil {

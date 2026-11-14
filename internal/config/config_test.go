@@ -83,6 +83,7 @@ func TestInvalidFiles(t *testing.T) {
 		{"claude.delivery = 'push'", "claude.delivery"},
 		{"codex.delivery = 'push'", "codex.delivery"},
 		{"[opencode]\ndelivery = 'interrupt'", "opencode.delivery"},
+		{"[claude]\ndelivery = 'Hooks'", "claude.delivery"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {
@@ -348,10 +349,10 @@ func TestClaudeDelivery(t *testing.T) {
 		t.Fatalf("default: %q %v", c.Claude.Delivery, err)
 	}
 	p := fixture(t, "[claude]\ndelivery = 'hooks'")
-	if c, err = Resolve(map[string]string{"config": p}, noenv); err != nil || c.Claude.Delivery != ClaudeDeliveryHooks {
+	if c, err = Resolve(map[string]string{"config": p}, noenv); err != nil || c.Claude.Delivery != ClaudeDeliveryHooks || c.Sources["claude.delivery"] != "file" {
 		t.Fatalf("file: %q %v", c.Claude.Delivery, err)
 	}
-	if c, err = Resolve(map[string]string{"config": p, "claude-delivery": "channel"}, noenv); err != nil || c.Claude.Delivery != ClaudeDeliveryChannel {
+	if c, err = Resolve(map[string]string{"config": p, "claude-delivery": "channel"}, noenv); err != nil || c.Claude.Delivery != ClaudeDeliveryChannel || c.Sources["claude.delivery"] != "flag" {
 		t.Fatalf("flag override: %q %v", c.Claude.Delivery, err)
 	}
 	env := func(k string) string {
@@ -360,8 +361,14 @@ func TestClaudeDelivery(t *testing.T) {
 		}
 		return ""
 	}
-	if c, err = Resolve(map[string]string{"config": fixture(t, "")}, env); err != nil || c.Claude.Delivery != ClaudeDeliveryHooks {
+	if c, err = Resolve(map[string]string{"config": fixture(t, "")}, env); err != nil || c.Claude.Delivery != ClaudeDeliveryHooks || c.Sources["claude.delivery"] != "env" {
 		t.Fatalf("env: %q %v", c.Claude.Delivery, err)
+	}
+	for _, flags := range []map[string]string{{"claude-delivery": "push"}, {"claude-delivery": ""}} {
+		flags["config"] = fixture(t, "")
+		if _, err := Resolve(flags, noenv); err == nil || !strings.Contains(err.Error(), "claude.delivery") {
+			t.Fatalf("flag %q accepted: %v", flags["claude-delivery"], err)
+		}
 	}
 }
 

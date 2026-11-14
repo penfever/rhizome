@@ -2,7 +2,7 @@
 
 **Connect coding agents across terminals, worktrees, and colleagues' machines.**
 
-![Concept illustration of coding agents connected through Rhizome nodes](docs/images/rhizome-agents.svg)
+![A Claude Code session and a Codex session subscribed to each other through Rhizome, each receiving the other's replies as peer activity](docs/images/claude-codex-demo.gif)
 
 Rhizome lets Claude Code, Codex, OpenCode, and Pi sessions discover each
 other, follow selected work, and exchange messages through MCP. Use it to
@@ -32,7 +32,21 @@ the API session. It can receive updates as the API work progresses and send a
 question back to that exact session. You still choose task ownership, repository
 access, branches, and how changes are reviewed and merged.
 
+## Session privacy
+
+Use `set_session_visibility(visibility="private")` to disconnect the calling
+session from discovery, collaboration and history. The choice persists across
+restarts. Use `public` to resume with a fresh live baseline, then subscribe
+explicitly. Humans can inspect or change inactive sessions with
+`rhizome session visibility <exact-local-session-id> [public|private]`.
+Success waits for local revocation acknowledgements; incomplete transitions
+remain private and report an error. Privacy cannot retract content already
+shared or delete native logs. See [session privacy](docs/privacy.md) for
+completion semantics, relay upgrades and first-exposure limitations.
+
 ## Quickstart
+
+![Concept illustration of coding agents connected through Rhizome nodes](docs/images/rhizome-agents.svg)
 
 ### 1. Install
 
@@ -60,7 +74,7 @@ notarized macOS installer places `rhizome` in `/usr/local/bin`, and archives are
 available for macOS, Linux, and Windows (Linux and Windows artifacts are unsigned).
 See the [installation and checksum guide](docs/releasing.md#installing-and-upgrading).
 
-**Alternative: build from source** with Go 1.27.3+ and [Task v3](https://taskfile.dev/docs/installation):
+**Alternative: build from source** with Go 1.27.4+ and [Task v3](https://taskfile.dev/docs/installation):
 
 ```sh
 git clone https://github.com/aliengiraffe/rhizome.git
@@ -98,9 +112,12 @@ With `rhizome` installed on `PATH`, run:
 rhizome setup
 ```
 
-Select your agents and review the setup changes. For a first local trial, keep
-MCP networking **local** and gateway pairing **off**. Setup installs the
-collaboration skill and, for Claude Code and Codex, their MCP registration
+Select your agents and review the setup changes. Setup checks Tailscale
+read-only, then asks how this device should connect: **only this device**
+(the default; nothing listens on the network), **paired devices** (invite/join
+through the background service over Tailscale or a LAN) or **direct network**
+(shared-token gossip). For a first local trial keep the default. Setup installs
+the collaboration skill and, for Claude Code and Codex, their MCP registration
 and binding hooks at user scope. OpenCode gets the skill and plugins; add its
 [MCP entry manually](docs/opencode.md#install). To take Rhizome out again,
 `rhizome uninstall` reverses these installs for the agents you pick (`--all`
@@ -111,7 +128,7 @@ Restart your agent and complete its integration steps:
 
 | Agent | Before the first conversation |
 | --- | --- |
-| **Claude Code** | Launch with `claude --dangerously-load-development-channels server:rhizome` and accept the channel/hook prompts. [Setup details](docs/reference.md#claude-setup). |
+| **Claude Code** | Launch with `claude --dangerously-load-development-channels server:rhizome` and accept the channel/hook prompts. On a claude.ai Team or Enterprise organization that has not enabled channels, Claude silently discards them: set `claude.delivery = "hooks"` to receive peer events through the binding hooks instead ([Claude delivery](docs/reference.md#claude-delivery)). [Setup details](docs/reference.md#claude-setup). |
 | **Codex** | Start a fresh session, review and trust the Rhizome hooks in `/hooks`. [Setup details](docs/codex.md#install). |
 | **OpenCode** | Load the MCP entry and installed plugins, then submit a human prompt. [Setup details](docs/opencode.md#install). |
 | **Pi** | Run `rhizome setup --agents pi`, then restart Pi (or `/reload`); each session binds when it starts. [Setup details](docs/pi.md#install). |
@@ -146,7 +163,11 @@ LAN or an existing Tailscale network.
 
 ### 1. Enable pairing on both machines
 
-For Tailscale, run on each machine:
+The guided path is `rhizome setup` on each machine: choose **paired devices**,
+accept the recommended transport (Tailscale when it is usable, otherwise LAN),
+let setup install and start the service, and create the invitation on one
+machine and join with it on the other when setup offers to. The equivalent
+flags, for Tailscale, are:
 
 ```sh
 rhizome setup --network local --gateway-mode tailscale --replace-config
@@ -208,7 +229,7 @@ requires the service on both machines.
 | --- | --- |
 | **Session identity** | Agent-specific hooks or verified transport metadata bind each session. Exact IDs keep worktrees, concurrent chats, and agent types distinct. |
 | **Local discovery and routing** | A private registry bootstraps memberlist discovery. Nodes exchange activity through authenticated gRPC on loopback; local peers can communicate directly. |
-| **Agent integration** | Claude receives channel notifications, Codex uses its local queue, and OpenCode uses a private plugin bridge. |
+| **Agent integration** | Claude receives channel notifications (or hook context where channels are disabled), Codex uses its local queue, and OpenCode uses a private plugin bridge. |
 | **Background service** | Observes supported local logs independently of open MCP sessions and maintains a metadata-first history catalog. Observation-only sessions cannot receive messages. |
 | **Paired-host gateway** | Persistent host keys and invitations establish a direct TLS connection. Each service exposes remote sessions locally through proxies, keeping local tokens on their own machines. |
 

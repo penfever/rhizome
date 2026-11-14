@@ -22,8 +22,11 @@ retirement, stale/child hooks, unsubscribe queue removal, transcript partial
 writes, historical partial-line baselines, duplicate records, truncation,
 filesystem-watch failure/poll recovery, bounded replay and expiry, concurrent
 replay/live boundaries, slow subscriber disconnection, bounded receiver queues,
-rate limits, channel handshake, prompt explicit delivery, 8 KiB batching and
-30-notification circuit-breaker re-arm.
+rate limits, channel handshake, prompt explicit delivery, 8 KiB batching,
+30-notification circuit-breaker re-arm, and hook delivery (`claude.delivery =
+"hooks"`: once-only `additionalContext` injection from main-thread
+`UserPromptSubmit`/`PreToolUse` hooks, retention across timed-out or cancelled
+hooks, inbox backpressure into the bounded queue, status fields).
 
 Session names (2026-10-19): unit tests cover label normalization (Unicode,
 control characters, whitespace, instruction-like text, 96-byte rune-safe
@@ -64,7 +67,7 @@ A resumed session enabled only `Read` to exercise the non-Rhizome tool hook.
 | Check | Observed result |
 | --- | --- |
 | MCP protocol/channel handshake | Channel registered with MCP 2025-11-25. The latest SDK's default 2026-07-28 negotiation initially caused Claude to skip channel registration; the adapter now constrains negotiation, with a regression test. |
-| Initial SessionStart | Claude skipped the MCP-tool hook with its documented non-blocking notice. Rhizome logged UNBOUND before any prompt. |
+| Initial SessionStart | Claude 2.1.319 `--init-only` in disposable state reproduced the startup hook error with the old template and emitted no SessionStart error with the new matcher. Full interactive launch confirmation is pending; first binding remains prompt-time. |
 | First prompt | UserPromptSubmit called `rhizome/observe_session`; two distinct IDs bound independently despite identical cwd/display names. |
 | Hook result parsing | Claude accepted the tool's `{}` text as hook JSON for prompt, stop, Read, clear and compact events. |
 | Recursion exclusions | Rhizome list/subscribe/send/publish calls did not invoke PreToolUse; a normal Read did invoke PreToolUse successfully. |
@@ -82,6 +85,25 @@ The process-level test separately checks a publisher restart while its subscribe
 stays alive. Delayed old hooks, replay races, queue saturation and circuit-breaker
 thresholds are deterministic automated scenarios, not claims about manually
 forcing every failure in the interactive UI.
+
+### SessionStart matcher regression (#106)
+
+Automated setup tests check the JavaScript source matcher (`startup` excluded;
+`resume`, `clear`, `compact`, `fork` and future sources allowed), replacement of
+old matcher-less hooks, repeat setup, and uninstall preservation of unrelated
+hooks. A Claude 2.1.319 `--init-only` comparison confirmed the startup matcher
+in the real client without model turns (the unrelated SessionEnd hook still
+has no MCP context in init-only mode). Codex retains its original template.
+The `/clear`, `/compact` and resume results above predate this matcher change;
+they have not been re-run interactively.
+
+To repeat with the new hooks, rerun `rhizome setup --agents claude` in disposable
+user state and launch two Claude sessions with the channel flag. Confirm no
+`SessionStart:startup hook error` notice, then bind both with a prompt and subscribe
+one to the other. Before sending another prompt after `/clear`, confirm a new
+session ID/generation and a `session-ended` notification at the peer. After
+`/compact`, confirm the binding refreshes with the same ID/generation. Resume
+and confirm the hook still binds. Record the client version and results.
 
 ## Repeatable manual steps
 
@@ -696,6 +718,67 @@ the session title; then subscribe from a Claude session and confirm activity and
 delivery in both directions, and that each delivery to the OpenCode session shows
 a "Rhizome · <kind> from <id>" toast. Interactive TUI parity with `run`/`serve` is
 otherwise unverified.
+
+## Guided setup: Tailscale detection, connection choices, pairing (#117, 2026-11-09)
+
+Automated, all without a real tailnet or service manager:
+
+- `internal/channel/tailscale_test.go` `TestProbeTailscale`: injected daemon
+  views for usable, absent CLI, unreachable daemon, `Stopped`/`NoState`, a
+  hostile backend state (sanitized and bounded), `NeedsLogin`/`NeedsMachineAuth`,
+  no address, an address outside the tailnet range, malformed JSON, another
+  failure, a hung client under a deadline (timeout) and under cancellation; the
+  detail never carries peer names, peer addresses or daemon output. The
+  production probe is run once with a one-second bound to confirm it is
+  classified and bounded on whatever the runner has installed.
+- `setup_config_test.go` `TestAskConfig`/`TestAskConfigStoredChoices`: the
+  explanation of all three models, local defaults, Tailscale recommended as
+  the pairing transport only when usable, LAN otherwise, explicit Tailscale
+  with the warning, custom endpoints, retry on bad answers, stored pairing kept
+  as the default without a "Change" line, stored direct gossip switched to
+  pairing with both changes explained and its options dropped, pairing switched
+  off explained, and that no answer sequence combines pairing with gossip.
+- `tui_test.go`: the probe starts with the screen, never blocks keys, updates
+  the hint for every state and only moves an untouched transport default when
+  the file has no pairing; connection choices and their fields, inline
+  endpoint policy validation, review lines (model, endpoints, changes, pairing
+  deferred or offered), back navigation and cancel without writes; the pairing
+  phase with injected service and admin fakes: declined service, start failure,
+  already-running service (restart message), readiness timeout with no
+  enrollment attempted, readiness after retries, invitation shown once and not
+  reported as connected, empty invitation never sent, rejected join kept on
+  screen with the retry path and reported as a non-zero exit, retry to pending
+  and to connected, interrupted pairing, and no offer for local or flag-only
+  runs. `setup_pairing_test.go` covers the bounded readiness wait, invitation
+  normalization, the operations and the `--plain` phase end to end.
+- `python3 scripts/smoke_tui.py`: real binary on isolated PTYs: the connection
+  question first with each explanation, back navigation, cancel without files,
+  paired devices to review and apply with the pairing commands printed, keep
+  leaving the file byte-identical, and a flag-only run that neither probes nor
+  mentions pairing. The probe's real result on the runner is deliberately not
+  asserted. The uninstall dry-run count in this script now includes Pi's three
+  files.
+
+Manual two-device checklist (Tailscale gateway, invite and join paths). This
+was **not** performed for this change; the automated coverage above is
+loopback/injected only and is not real-tailnet validation:
+
+1. On device A (logged into the tailnet): `rhizome setup`, choose **paired
+   devices**, confirm the check reports `usable` with A's `100.x` address and
+   the transport defaults to `tailscale`, keep automatic endpoints, install and
+   start the service, then choose **create an invitation**. Verify the
+   `rhizome join …` line is shown once and `rhizome peers list` is still empty.
+2. On device B: `rhizome setup`, same choices, choose **join** and paste the
+   command. Verify setup reports the host ID and `connected`, and that
+   `rhizome peers list` on both devices shows the other host connected with the
+   gateway endpoints on their Tailscale IPv4 and port 7947.
+3. Repeat with the roles swapped (B invites, A joins), then with Tailscale
+   stopped on one device: the check must explain the state, local-only setup
+   must still complete, and the service must refuse to start in Tailscale mode.
+4. Re-run setup on a paired device, keep the file, decline the service step,
+   and confirm the printed commands; then re-run choosing **only this device**
+   and confirm the review states that pairing turns off before anything is
+   written.
 
 ## Terminal interfaces (#48, 2026-10-21)
 

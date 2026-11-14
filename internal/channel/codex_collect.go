@@ -119,11 +119,12 @@ type itemState struct {
 	status string
 }
 type codexCollector struct {
-	thread   string
-	reader   codexReader
-	wake     chan struct{}
-	baseline bool
-	lastTurn string
+	privacyRevision string
+	thread          string
+	reader          codexReader
+	wake            chan struct{}
+	baseline        bool
+	lastTurn        string
 	// oversized is a turn whose items exceed the pagination cap. Its activity
 	// is skipped (one gap notice) so it neither blocks delivery nor re-pages.
 	oversized string
@@ -189,6 +190,23 @@ func (c *codexCollector) gap(n *Node, gen uint64, reason string) {
 	c.order = nil
 }
 func (c *codexCollector) scan(ctx context.Context, n *Node, gen uint64) bool {
+	n.collectionGate.Lock()
+	defer n.collectionGate.Unlock()
+	identity := n.local()
+	policy, err := loadVisibility(n.runtime, identity.SessionId)
+	if err != nil || policy.Visibility != "public" {
+		c.privacyRevision = "private"
+		return true
+	}
+	if c.privacyRevision != policy.Revision {
+		c.baseline = false
+		c.lastTurn = ""
+		c.items = map[string]itemState{}
+		c.turns = map[string]string{}
+		c.order = nil
+		c.privacyRevision = policy.Revision
+	}
+
 	var read struct {
 		Thread struct {
 			ID     string  `json:"id"`

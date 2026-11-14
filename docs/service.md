@@ -235,8 +235,13 @@ a differently keyed mirror.
 
 ## Collection and history boundaries
 
-The primary mechanism is fsnotify's native backend on each OS. Every discovered
-directory gets a watch; nearest existing parents cover roots created later.
+The primary mechanism is fsnotify's native backend on each OS. Only configured
+agent roots and discovered directories beneath them get watches;
+OpenCode watches only its data directory, never its subtree. Parent folders are
+never watched. The user home directory, its ancestors and filesystem roots are
+rejected even through symlink aliases, with degraded coverage reported. Missing
+or removed roots are rechecked within 30 seconds without restarting the service.
+These checks probe at most four unregistered roots, not existing directory trees.
 Directory creation triggers traversal of that subtree. Startup inventory establishes
 EOF baselines for existing files; creation notifications queued during inventory
 ensure newly created files are consumed from byte zero. A one-second maintenance
@@ -367,3 +372,11 @@ Arrows and PgUp/PgDn scroll; resizing and no-color terminals are supported.
 status view without lifecycle actions. Explicit subcommands remain one-shot;
 `service run` never launches a UI. Bare noninteractive `service` remains a usage
 error. An explicit `--tui` requires usable terminals and otherwise fails promptly.
+
+## Session privacy
+
+The observer watches the shared visibility directory and acknowledges a transition
+only after private catalog rows have been removed and flushed. It does not create
+private publisher nodes after direct integrations release their collection lease.
+No service restart is required. An old or unresponsive process causes an incomplete
+transition error, with private policy retained. See [session privacy](privacy.md).

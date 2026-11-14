@@ -25,7 +25,7 @@ the table for diagnostics; `setup --hostname` only writes the file. All startup 
 | `debug` | `RHIZOME_DEBUG` (boolean) | mcp, service install/run `--debug` | `false`; adds a session status substatus and debug-level diagnostics (stderr for MCP, `observer.log` for the service; metadata only) |
 | `claude.config_dir` | `CLAUDE_CONFIG_DIR` | — | `~/.claude` |
 | `claude.projects_dir` | — | service `--claude-root` | effective `claude.config_dir` + `/projects` |
-| `claude.delivery` | `RHIZOME_CLAUDE_DELIVERY` | mcp `--claude-delivery` | `channel`; `hooks` delivers through hook `additionalContext` (see [Claude delivery](#claude-delivery)) |
+| `claude.delivery` | `RHIZOME_CLAUDE_DELIVERY` | mcp `--claude-delivery` | `channel`; `hooks` returns peer events as hook `additionalContext` for organizations without channels ([Claude delivery](#claude-delivery)) |
 | `codex.bin` | — | mcp `--codex-bin` | `codex` |
 | `codex.delivery` | `RHIZOME_CODEX_DELIVERY` | mcp `--codex-delivery` | `queue`; `steer` injects into a running turn (see [Codex delivery](codex.md)) |
 | `opencode.delivery` | `RHIZOME_OPENCODE_DELIVERY` | mcp `--opencode-delivery` | `queue` waits for the running turn to end; `steer` delivers at its next model step (see [OpenCode delivery](opencode.md#delivery)) |
@@ -155,7 +155,7 @@ services pin the absolute TOML path and reread it on restart; see
 
 ## Codex
 
-Local Codex sessions use `rhizome mcp --agent codex`, with the same thirteen tools and
+Local Codex sessions use `rhizome mcp --agent codex`, with the same fourteen tools and
 cross-agent subscriptions. Incoming events use `codex queue`; outgoing activity
 comes from read-only App Server polling. Each caller thread has an independent
 node even when Codex shares an MCP connection. See [Codex setup and tested
@@ -202,7 +202,7 @@ from the checkout in place of `rhizome`.
 
 ## OpenCode
 
-Local OpenCode 2.x sessions use `rhizome mcp --agent opencode` (twelve tools; no
+Local OpenCode 2.x sessions use `rhizome mcp --agent opencode` (thirteen tools; no
 `observe_session`) plus an embedded relay plugin installed by
 `rhizome setup --agents opencode`. Configuration and `[network]` modes apply as
 for the other agents. A session binds on its first human prompt; its
@@ -243,7 +243,7 @@ at user scope (`~/.claude.json`) and installs the binding hooks in
 `~/.claude/settings.json`; see [Installing into agents](#installing-into-agents).
 
 **Contributor path for this repository:** build the checkout with `task build`
-(Go 1.27.3+ and [Task v3](https://taskfile.dev/docs/installation) required).
+(Go 1.27.4+ and [Task v3](https://taskfile.dev/docs/installation) required).
 This repository ships `.mcp.json` and `.claude/settings.json`; from its root,
 start Claude in two terminals with
 `claude --dangerously-load-development-channels server:rhizome`.
@@ -253,12 +253,15 @@ one, and project hooks run in addition to user hooks, so keep the Rhizome hooks
 in one place. Do not change the server key unless you also update the hook server
 name, tool exclusions and channel flag.
 
-The process starts **UNBOUND**. Initial `SessionStart` is skipped by Claude because
-its MCP clients are not yet available; Claude 2.1.302 displays a non-blocking hook
-notice. Submit a prompt to bind. Later `SessionStart`, `UserPromptSubmit`,
-`PreToolUse` and `Stop` hooks refresh the binding. The negative-lookahead matcher
-excludes `mcp__rhizome__*`; hooks do not ingest activity themselves. See
+The process starts **UNBOUND**. The Claude `SessionStart` source matcher excludes
+`startup`, when MCP clients are not yet available, avoiding the startup hook
+notice. Submit the first prompt to bind. Other `SessionStart` sources (including
+`resume`, `clear` and `compact`), `UserPromptSubmit`, `PreToolUse` and `Stop` hooks
+refresh the binding. The `PreToolUse` negative-lookahead matcher excludes
+`mcp__rhizome__*`; hooks do not ingest activity themselves. See
 [MCP tool hook timing](https://code.claude.com/docs/en/hooks#mcp-tool-hook-fields).
+Existing installations must rerun `rhizome setup --agents claude` to replace the
+old matcher-less hook; setup preserves unrelated hooks.
 Never ask Claude to call `observe_session` manually or invent an ID.
 
 The official Go MCP SDK handles initialization and tools. A transport adapter uses
@@ -270,35 +273,46 @@ Stdout is exclusively MCP; application diagnostics go to stderr.
 ### Claude delivery
 
 Channel notifications are fire-and-forget: a successful write counts as
-`Written`, but Claude Code discards it unless channels are available to the
-account. On claude.ai Team and Enterprise plans that requires
-`channelsEnabled: true` in the organization's managed settings; Claude shows a
-short startup notice when it rejects the channel. Organizations that cannot
-enable channels can set `claude.delivery = "hooks"` (or pass
-`--claude-delivery hooks`). Rhizome then holds each event, wrapped in the same
-untrusted-peer envelope, and returns it as `additionalContext` from the next
-main-thread `UserPromptSubmit` or `PreToolUse` hook. Events arrive only while
-Claude is working, not while it is idle.
+`Written`, but Claude Code discards it unless channels are enabled for the
+account. On claude.ai Team and Enterprise plans an Owner must enable channels
+(`channelsEnabled: true` in managed settings); Claude shows a short startup
+notice ("Channels are not enabled for your org") when it rejects the server,
+and Rhizome cannot observe that decision: `send` is still accepted, `Written`
+still grows and `delivery_error` stays empty. Organizations that cannot enable
+channels set `claude.delivery = "hooks"` (`RHIZOME_CLAUDE_DELIVERY=hooks` or
+`rhizome mcp --agent claude --claude-delivery hooks` in the MCP registration).
+Rhizome then holds each delivered event, wrapped in the same untrusted-peer
+envelope as the other agents, and the next main-thread `UserPromptSubmit` or
+`PreToolUse` `observe_session` hook returns it as
+`hookSpecificOutput.additionalContext`; Claude Code reads an `mcp_tool` hook's
+text result like command-hook stdout. Events therefore arrive while Claude is
+working (the next prompt or tool call), not while it is idle, and the
+`--dangerously-load-development-channels` flag is unnecessary in this mode.
 
-Each event is injected once. A hook drains the inbox only if its request is
-still live and less than three seconds have passed since it started, so a hook
-that runs into Claude's five-second timeout leaves the events for the next
-hook. The inbox is bounded at 64 KiB; beyond that the normal delivery queue
-retains events. `list_sessions` reports `claude_delivery` and
-`hook_queue_depth`, and `counters.HookInjected` counts injected events.
+Each event is injected once. A hook drains the inbox only while its request is
+live and less than three seconds after it started, so a hook that runs into
+Claude's five-second timeout (whose output Claude discards) leaves the events
+for the next hook; subagent hooks never drain it. The inbox holds 64 KiB; beyond
+that the normal bounded delivery queue retains events. The pause notice and the
+[restart notice](service.md#automatic-updates) use the same path. `list_sessions`
+reports `claude_delivery: "hooks"` and `hook_queue_depth`, and
+`counters.HookInjected` counts injected events; `Written` counts events held
+for a hook. In channel mode neither field is reported. Restart the Claude MCP
+process (restart Claude Code) after changing the setting.
 
 ## Tools
 
 | Tool | Behavior |
 | --- | --- |
 | `list_sessions()` | `live` or `recent` sessions, one row per `session_id` ([Session status](../README.md#session-status); `--debug` appends a substatus), `delivery_capable`, recorded `last_activity_at`, a `recent_sessions` block, bound peer identities, project, `session_name` and host labels, conflicts, local binding, subscription/reconnect/gap state, queue depth and counters. `live` means a node is bound and reachable, not that a window is open: OpenCode and Codex sessions can stay `live` after their UI closes (see [docs/opencode.md](opencode.md#why-a-closed-session-can-still-be-live)). |
+| `set_session_visibility(visibility)` | Set only the verified caller public or private; persists and waits for local revocation acknowledgements. See [privacy](privacy.md). |
 | `set_session_name(name, session_id?)` | Name the caller's bound session for peers, or with an exact `session_id` another session on this device. Empty clears the override. Returns the effective name and its source. |
 | `subscribe(session_id)` | Follow an exact ID. Idempotent; retains intent while absent. Explicitly re-arms that origin if delivery is paused. |
 | `unsubscribe(session_id)` | Cancel follow and remove pending activity from that subscription. Direct messages are independent. |
 | `publish(text, reply_to?)` | Announce to current subscribers. |
 | `send(session_id, text, reply_to?)` | Direct message without a subscription. Returns a stable message ID, receiver queue acceptance and `receiver_delivery`, the receiver gateway's account of what happens next (for example "held: receiver's delivery path is not ready (notLoaded)"). |
 | `delivery_status(session_id, agent_type, message_id)` | Whether a sent message has reached the receiving agent on this device: `in_transcript` (with `recorded_at` when the line has a timestamp) once its envelope is in the receiver's native log, else `not_in_transcript`. Scans at most the last 128 MiB of the log. Adds `inbox: unread` or `inbox: read` when the message is in the receiver's [durable inbox](#durable-inbox). Requires the observer service's catalog. |
-| `observe_session(...)` | Internal hook binding/refresh and transcript wake-up. Not offered in OpenCode mode. |
+| `observe_session(...)` | Internal hook binding/refresh and transcript wake-up. With `claude.delivery = "hooks"`, main-thread `UserPromptSubmit`/`PreToolUse` calls return held peer events as `additionalContext` ([Claude delivery](#claude-delivery)). Not offered in OpenCode mode. |
 | `send_file`, `list_files`, `accept_file`, `cancel_file` | Explicit file offers between sessions on paired hosts; see [file transfers](files.md). |
 | `search_sessions(filters…, host_id?)` | Metadata search of the local history catalog by exact ID, agent, project path, title substring, and activity date, with deterministic pagination. Rows carry history availability and current live status separately. Requires the observer service's catalog. With `host_id`, searches one directly paired host that opted in. |
 | `read_session_history(session_id, agent_type, limit?, cursor?, host_id?)` | Bounded pages of recorded assistant text and tool/turn markers from one historical session's native log, in source order over a fixed snapshot. Excludes reasoning, subagents, and peer traffic, and excludes prompts and tool bodies unless the serving host sets `[sessions].share_prompts_and_tools`. With `host_id`, reads from one opted-in paired host within its owner's lookback. |
@@ -851,35 +865,63 @@ scroll long views. `--plain` retains the original prompts (and their immediate
 skill installation behavior). Fully specified `--agents` plus `--network`
 invocations stay noninteractive.
 
-Setup asks how Rhizome will be used and writes
+Setup asks how this device should connect and writes
 `~/.rhizome/config.toml` (or the file selected with `--config`/`RHIZOME_CONFIG`,
 which setup may create):
 
-1. **Gateway pairing**: `off` (default), `lan`, or `tailscale`, with optional
-   concrete listen/advertise IP:port endpoints. This connects per-user services
-   through explicit invite/join, independently of the local cluster token.
-2. **MCP network**: `local` (default), or legacy shared-token `lan`/`tailscale`
-   gossip. Pairing requires local MCP networking; incompatible choices fail.
-   Legacy mode options retain their existing meaning. Tailscale probing is
-   advisory in the wizard; startup still fails closed if the daemon is unavailable.
-3. **Hostname override**: Enter keeps the stored label; `-` clears it to use the
-   OS hostname. Optional gateway endpoints also accept `-` for automatic selection.
-4. **Automatic updates**: whether the background service installs verified
+1. **Tailscale check**: a read-only, bounded (15 s) probe of the local
+   Tailscale CLI/daemon runs first and changes nothing. It reports usable (with
+   this device's Tailscale IPv4), CLI not found, daemon unavailable, not logged
+   in or approved, no Tailscale IPv4 address, unreadable response, or timeout,
+   each with the next step. The screen keeps accepting answers while it runs.
+   Startup still fails closed if Tailscale is unavailable later.
+2. **Connection**: `only this device` (default: loopback MCP networking,
+   gateway pairing off, no service needed), `paired devices` (the background
+   service pairs hosts through explicit invitations over `tailscale` or `lan`;
+   MCP networking stays `local`; per-host, revocable trust; each host keeps its
+   own token) or `direct network` (advanced: shared-token `lan`/`tailscale`
+   gossip in every MCP process; no pairing or service; separate from pairing).
+   Usable Tailscale is recommended for paired devices and becomes the suggested
+   transport, but no recommendation enables networking by itself. Prompts
+   default to the stored model and transport, and the review names every
+   change from a stored file (for example switching direct gossip to local
+   because pairing requires it, or pairing turning off); the two models are
+   never combined.
+3. **Transport details**: paired devices asks for the transport and whether to
+   set custom gateway listen/advertise `IP:port` endpoints (default automatic:
+   the Tailscale IPv4 or a private LAN interface, port 7947, resolved when the
+   service starts, so no address entry is needed). Direct network asks the
+   legacy gossip options, which retain their existing meaning.
+4. **Hostname override**: Enter keeps the stored label; `-` clears it to use the
+   OS hostname.
+5. **Automatic updates**: whether the background service installs verified
    releases (default yes, or the stored value). Answering the default on a file
    that never set the key leaves the key out; any other answer writes
    `[update] enabled`. See [automatic updates](service.md#automatic-updates).
-5. **Directories**: optionally change runtime scope, Claude config directory,
+6. **Directories**: optionally change runtime scope, Claude config directory,
    Codex home or executable. Changing runtime scope selects different token,
    host identity and pairing state; the old state remains in the old directory.
-6. **Service**: asks whether to install and start the background service
-   (default no). The question follows the configuration step whether the file
-   was created, updated, or kept, and runs the same lifecycle as
-   `rhizome service install --config <path>`: a missing service is installed
-   and started, a stopped compatible one is started, and a running one counts
-   as success without a restart. Setup reports success only after the observer
-   is running and names the configuration file it used. On failure the written
-   configuration and any installed definition stay in place for diagnosis;
-   declining leaves the service untouched.
+7. **Service**: asks whether to install and start the background service
+   (default no; paired devices need it). The question follows the configuration
+   step whether the file was created, updated, or kept, and runs the same
+   lifecycle as `rhizome service install --config <path>`: a missing service is
+   installed and started, a stopped compatible one is started, and a running
+   one counts as success without a restart. Setup reports success only after
+   the observer is running and names the configuration file it used. On
+   failure the written configuration and any installed definition stay in
+   place for diagnosis; declining leaves the service untouched.
+8. **Pairing** (paired devices only, after apply): once the observer is
+   confirmed and the service's gateway answers its private control endpoint
+   (within 10 s), setup offers to create an invitation, join with one, or do it
+   later. These are the regular [`invite`/`join`](gateway.md#pair-and-manage)
+   operations with their trust checks. An invitation is printed once as the
+   `rhizome join …` command to share privately and is reported as "no peer is
+   connected yet"; a join reports the host ID and whether `peers` currently
+   shows it connected. If the service was already running when setup rewrote
+   the file, setup asks for `rhizome service restart` instead of pairing
+   against stale settings. Declining, an unready gateway or a failed attempt
+   prints the exact commands and retry path; completed steps are never rolled
+   back. Setup never trusts discovered devices or enables history sharing.
 
 Prompts default to stored choices, without persisting shell overrides. Keeping
 an existing file leaves it byte-identical (the service step is still offered). Updating merges selected settings and
@@ -921,8 +963,9 @@ terminal and without `--network` or `--gateway-mode`, setup installs the selecte
 agents, leaves configuration untouched and says so on stderr; it refuses to
 register an explicit `--config` file that does not exist yet. The terminal screen
 replaces a file by merging its answers into the stored one, so settings it does
-not ask about (gateway pairing, history policy, agent options) survive; use the
-flags or `--plain` to change gateway pairing.
+not ask about (history policy, agent options) survive; the connection answer
+covers both `[network].mode` and `[gateway]`. Flag-only runs never run the
+Tailscale check, enroll or start the service.
 
 Bare `rhizome service` opens [service management](service.md#terminal-interface)
 on usable terminals. `rhizome service status --tui` and
@@ -985,3 +1028,11 @@ Files are limited to 16 MiB and arrive in a private **temporary** inbox. Copy a
 verified download to your project to keep it: expiry, disconnection, or service
 restart removes inbox files. Offers never authorize automatic acceptance or
 execution. See [file transfers](files.md) for CLI usage, limits and lifecycle.
+
+## Session privacy
+
+The caller-only `set_session_visibility(visibility="private"|"public")` tool and
+`rhizome session visibility [--config FILE] <exact-local-session-id> [public|private]`
+control persistent local policy. Private sessions retain their local status/control
+interface. See [session privacy](privacy.md) for acknowledgements, errors,
+re-publication, relay upgrades and limitations.

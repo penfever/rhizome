@@ -5,7 +5,8 @@
 Rhizome is a Go MCP bridge for local coding agent sessions (Claude Code, Codex,
 OpenCode and Pi). It binds verified session identities, collects selected activity,
 discovers peers through memberlist, and delivers events over authenticated
-loopback gRPC. Claude uses channel notifications; Codex uses per-thread nodes and
+loopback gRPC. Claude uses channel notifications (or hook `additionalContext` with
+`claude.delivery = "hooks"`); Codex uses per-thread nodes and
 local queue delivery; OpenCode uses an embedded plugin over a private Unix socket
 bridge; Pi uses an embedded extension over the same kind of bridge, bound by a
 per-session nonce ([docs/pi.md](docs/pi.md)). An optional per-user service observes coding agent logs independently of MCP
@@ -45,7 +46,7 @@ transcripts. Support and response-time promises require maintainer approval.
 
 ## Commands and completion
 
-Run from the repository root with Go 1.27.3+, Python 3, and [Task v3](https://taskfile.dev/docs/installation).
+Run from the repository root with Go 1.27.4+, Python 3, and [Task v3](https://taskfile.dev/docs/installation).
 Install Task with `brew install go-task` or
 `go install github.com/go-task/task/v3/cmd/task@latest`, with the Go bin directory
 on `PATH`. Prefer Taskfile tasks over their underlying commands; `task --list`
@@ -123,14 +124,38 @@ a real tailnet; the two-device Tailscale checklist in
 ## Terminal interfaces
 
 `setup` uses Bubble Tea on usable stdin/stdout terminals when input is needed;
-`--plain` retains legacy prompts. Stage all answers until review/apply; cancellation
+`--plain` retains legacy prompts. Both flows open with a bounded (15 s),
+cancellable, injectable, read-only Tailscale probe (`channel.ProbeTailscale`,
+states `usable|missing_cli|daemon_unavailable|needs_login|no_address|error|timeout`
+with fixed explanations; never raw status JSON, daemon text or peer inventories)
+and the connection question (`setup_connection.go`): `only this device`
+(default; loopback MCP, gateway off), `paired devices` (gateway invite/join
+over `tailscale` or `lan`, `[network].mode` pinned to `local`, endpoints
+automatic unless custom) or `direct network` (shared-token gossip, gateway
+off). A usable tailnet is shown as a recommendation and may only move an
+untouched transport default when the stored file has no pairing; it never
+pre-selects networking. Prompts default to the stored model, the review lists
+the plan and every change from the stored file (`connectionPlan.lines`), and the
+two tables are never combined. Stage all answers until review/apply; cancellation
 before apply must not write skills, config, or service state. The opt-in
 "install and start" service step (`setup_service.go`) follows the configuration
 whether it was created, replaced, or kept; it runs the normal install lifecycle
 through an injectable `serviceInstaller`, reports running only after
-`service.Inspect` confirms the observer lock, distinguishes an installed
+`service.Inspect` confirms the observer lock, records whether the observer
+already ran before the step (`WasRunning`), distinguishes an installed
 definition from a running observer on failure, and is never run by `--list` or
-by `--network` without the interactive questions. Use `config.Preview`
+by `--network` without the interactive questions. Pairing is a separate
+post-apply phase (`setup_pairing.go`, same in the screen and `--plain`): only
+when the saved file enables the gateway, the service step confirmed the
+observer, the service was not already running a rewritten file (then it prints
+`rhizome service restart` and the commands), and the gateway control endpoint
+answers a `peers` query within 10 s, setup offers `invite` / `join` / later
+through an injectable `gatewayAdmin` over the service's own actions and trust
+checks. An invitation is shown once as the `rhizome join …` command and reported
+as "no peer connected yet"; a join reports the host ID with the connection
+state read back from `peers`. Declined, unready or failed pairing prints the
+exact commands and retry path; nothing is rolled back. `--network`,
+`--gateway-mode`, `--list` and help never probe, enroll or start services. Use `config.Preview`
 for resolver-backed validation without disk writes. Filter network fields by the
 selected mode. Bare terminal `service` manages lifecycle (confirm stop/uninstall),
 `service restart` is explicit and noninteractive: require an installed definition
@@ -179,7 +204,7 @@ See [setup](docs/reference.md#creating-the-configuration-file),
   existing file.
   Services pin that absolute path, never snapshot settings; installation requires
   the file and rejects overrides that would be lost when the service starts.
-  CLI usage: `rhizome --version | mcp | setup | uninstall | service | update | config | token | invite | join | peers | files | demo [flags]`.
+  CLI usage: `rhizome --version | mcp | setup | uninstall | service | update | config | token | session | invite | join | peers | files | demo [flags]`.
   Top-level `debug` (`RHIZOME_DEBUG`, `--debug`) is the one top-level boolean setting.
   `[update]` (`enabled` default true, `check_interval` default `24h`, 1h–720h)
   resolves with `RHIZOME_UPDATE` / `RHIZOME_UPDATE_CHECK_INTERVAL` and the
@@ -222,8 +247,8 @@ See [setup](docs/reference.md#creating-the-configuration-file),
   stable reason and host ID prefix (never session data); a link that ends within
   5 s counts as a dial failure for the per-host backoff, whichever side dialed,
   and a longer one resets it. State is private under
-  `<runtime>/gateway/`. Session privacy (#37) is not yet implemented; the shared
-  export/access predicate must enforce it when added. See [docs/gateway.md](docs/gateway.md)
+  `<runtime>/gateway/`. Session privacy is enforced through the shared runtime policy before discovery,
+  recent export and route resolution; cached routes must still fail closed. See [docs/gateway.md](docs/gateway.md)
   for enrollment recovery, bounds, configuration, compatibility, and manual checks.
   Run `python3 scripts/smoke_gateway.py` for gateway changes in addition to the
   required existing checks. Gateway protocol code is in `internal/channel/gateway*.go`.
@@ -248,6 +273,9 @@ See [setup](docs/reference.md#creating-the-configuration-file),
   plus `hooks.json`. The entry is the absolute executable with `mcp --agent
   <name>`, `--config` only for an explicit existing file, `--codex-bin` when
   resolvable, and the agent home in `env` only when non-default; never a token.
+  Claude `SessionStart` excludes `startup` by source matcher (MCP is not ready);
+  other sources still rebind, and Codex has no source matcher. Existing users
+  rerun `rhizome setup --agents claude` to upgrade their hooks.
   Hook templates in `setup_agents.go` must equal `.claude/settings.json` and
   `examples/codex/hooks.json` (tested). Merges touch only Rhizome entries,
   keep everything else, back up changed files as `<file>.bak-<timestamp>`,
@@ -375,6 +403,25 @@ See [setup](docs/reference.md#creating-the-configuration-file),
   waits for the bound/ready gates, bypasses pause, batching and the rate limit,
   and never enters activity, retention, gossip, the gateway or history; logs
   carry versions and outcome codes only.
+- **Claude delivery is channel by default, hooks by explicit choice.**
+  `notifications/claude/channel` is fire-and-forget, so `Written` counts a
+  notification Claude Code discards when the organization has not enabled
+  channels (claude.ai Team/Enterprise default); Rhizome cannot observe that
+  gate. `claude.delivery` (`RHIZOME_CLAUDE_DELIVERY`, `mcp`/`config`
+  `--claude-delivery`; exactly `channel` or `hooks`, flag > env > file >
+  default) selects the path for `mcp --agent claude` only. In `hooks` mode
+  `Node.notify` is `holdForHook` (`internal/channel/hook_delivery.go`): the
+  delivery loop's selection, batching, pause and rate limit are unchanged, each
+  notification is wrapped in `peerEnvelope` and held in a 64 KiB inbox (a full
+  inbox returns `errDestinationUnavailable`, so the bounded queue retains the
+  event), and `observe_session` returns the held envelopes once as
+  `hookSpecificOutput.additionalContext` only for main-thread
+  `UserPromptSubmit`/`PreToolUse` hooks whose request is still live and within
+  3 s of arrival (Claude discards the output of a hook that hits its 5 s
+  timeout). Every other hook, subagent hook, and channel mode return `{}`.
+  `list_sessions` adds `claude_delivery` and `hook_queue_depth` only in hooks
+  mode; `counters.HookInjected` counts injections. Keep
+  [reference "Claude delivery"](docs/reference.md#claude-delivery) in step.
 - **Hostnames are display labels.** Shared top-level `hostname` is written by
   the setup prompt or `setup --network ... --hostname ...`. Blank clears an
   override and uses the OS short hostname in every mode, including Tailscale.
@@ -386,6 +433,19 @@ See [setup](docs/reference.md#creating-the-configuration-file),
 - **Route only by exact `session_id`, never display name, session name, cwd, or
   PID.** Multiple sessions can share those labels; ambiguous/stale identities must
   fail closed (`internal/channel/network.go`, `internal/channel/discovery.go`).
+- **Session privacy is persistent and fail-closed.** `visibility.go` owns exact-ID
+  public/private policy in `<runtime>/visibility/`. Caller-only
+  `set_session_visibility` and `rhizome session visibility` share a serialized
+  private barrier and bounded cross-process acknowledgements; never report a
+  policy write alone as completed revocation. Native runtime watches plus
+  reconciliation clear affected streams, subscriptions, replay and queues.
+  History checks every page, including stale catalogs; only the observer removes
+  catalog entries. Re-publication requires a fresh collection baseline and
+  explicit subscriptions. OpenCode/Pi relay `emitted_at` before buffering; frames
+  from before re-publication or old unstamped relays fail closed after a transition.
+  See [privacy](docs/privacy.md) for completion semantics, CLI, upgrade and scope.
+  Run `python3 scripts/smoke_visibility.py` for privacy changes, plus the gateway
+  smoke and standard checks. Do not log policy contents or transcript text.
 - **Session names are untrusted labels with fixed precedence.** Explicit
   `set_session_name` override, then the agent's native title (Claude
   `custom-title`/`ai-title` records, Codex `thread.name`), then the stable fallback
@@ -482,7 +542,7 @@ See [setup](docs/reference.md#creating-the-configuration-file),
   only from the plugin bridge.** Never add `observe_session` to OpenCode mode. The
   plugin relays allowlisted events of its own directory's sessions and executes
   deliveries; all filtering stays in Go. OpenCode mode shares configuration,
-  `[network]` and the other 12 tools. Each bound session holds the collection
+  `[network]` and the other 13 tools. Each bound session holds the collection
   lease; on an instance reload the predecessor releases leases once a successor
   owns the socket (never unlinking it), and the successor retries busy binds for
   at most 60 s; the plugin re-binds its sessions after every reconnect. Bindings
@@ -535,7 +595,10 @@ See [setup](docs/reference.md#creating-the-configuration-file),
   once, and a failed live peer is not re-probed by the process for 30 s
   (`internal/channel/registry.go`).
 - **Native watches drive observer collection.** Do not add normal-path tree
-  polling. Keep file/directory/session limits and visible degraded coverage.
+  polling. Watch only agent roots and their subdirectories (OpenCode: root only),
+  never parent folders, HOME or its ancestors, including symlink aliases. Bounded
+  rechecks of missing roots every 30 seconds are allowed, not tree polling.
+  Keep file/directory/session limits and visible degraded coverage.
   See `internal/channel/observer.go`, `ownership.go`, and `docs/service.md`.
 - **History is a read-only, local, metadata-first cache.** The observer is the
   only catalog writer (`<runtime>/history/catalog.json`, atomic rename, version
@@ -597,8 +660,7 @@ See [setup](docs/reference.md#creating-the-configuration-file),
   own catalog only (never forwarded), stamped with the authenticated `host_id`
   on receipt, stored in private `<runtime>/gateway/recent.json` for local MCP
   processes only while the link and gateway live; they never become proxies and
-  grant no history access. `recentExportable` must be extended together with
-  `gatewayExportable` when session privacy (#37) lands. README "Session status"
+  grant no history access. Recent selection filters shared session visibility before applying the row cap. README "Session status"
   is the user contract; restart applies configuration changes.
 - **Peer history is opt-in, serving-host enforced and direct.** File-only keys
   `[gateway.history]` (`enabled` default false, `lookback` default `30d`) and

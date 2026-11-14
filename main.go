@@ -35,7 +35,7 @@ func main() {
 
 func entry() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: rhizome --version | mcp | setup | uninstall | service | update | config | token | files | inbox | wait-inbox | invite | join | peers | demo [flags]")
+		return fmt.Errorf("usage: rhizome --version | mcp | setup | uninstall | service | update | config | token | session | files | inbox | wait-inbox | invite | join | peers | demo [flags]")
 	}
 	mode := os.Args[1]
 	if mode == "--version" || mode == "-version" {
@@ -110,7 +110,7 @@ func entry() error {
 		}
 	case "config":
 		fs := flag.NewFlagSet("config", flag.ContinueOnError)
-		config.Bind(fs, "runtime-dir", "codex-bin", "claude-root", "codex-root", "opencode-root", "pi-root", "update", "update-check-interval")
+		config.Bind(fs, "runtime-dir", "codex-bin", "claude-delivery", "claude-root", "codex-root", "opencode-root", "pi-root", "update", "update-check-interval")
 		if err := fs.Parse(os.Args[1:]); err != nil {
 			return err
 		}
@@ -122,6 +122,8 @@ func entry() error {
 			return err
 		}
 		return c.Write(os.Stdout)
+	case "session":
+		return sessionCommand(os.Args[1:])
 	case "files":
 		return filesCommand(os.Args[1:])
 	case "inbox":

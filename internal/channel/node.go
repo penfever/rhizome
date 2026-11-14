@@ -66,9 +66,11 @@ type feed struct {
 	token            string
 }
 type listener struct {
-	queue   chan *pb.Event
-	done    chan struct{}
-	details bool // subscriber accepts detail kinds (FollowRequest.details)
+	egress     sync.Mutex
+	subscriber string
+	queue      chan *pb.Event
+	done       chan struct{}
+	details    bool // subscriber accepts detail kinds (FollowRequest.details)
 }
 type pending struct {
 	event        *pb.Event
@@ -81,8 +83,9 @@ type counters struct {
 	// Redacted counts published activity events whose text was changed by the
 	// secret filter; RedactionFailures counts those masked without a completed scan.
 	Redacted, RedactionFailures uint64
-	// HookInjected counts events returned to Claude as hook additionalContext
-	// (claude.delivery = "hooks"); Written counts them when they are held.
+	// HookInjected counts events returned to Claude Code as hook
+	// additionalContext (claude.delivery = "hooks"); Written counts them when
+	// they are held for the next hook.
 	HookInjected uint64
 	// Steered counts events injected into a running Codex turn (codex.delivery
 	// = "steer"); QueueHandoffs counts those handed to `codex queue`.
@@ -103,9 +106,10 @@ type Node struct {
 	deliveryError    string
 	deliveryReady    bool
 	// hookDelivery holds Claude events for hook additionalContext instead of
-	// channel notifications; hookInbox is guarded by mu.
+	// channel notifications; hookInbox and hookInboxBytes are guarded by mu.
 	hookDelivery   bool
 	hookInbox      []string
+	hookOrigins    []string
 	hookInboxBytes int
 	// codexOut holds Codex events until they can be steered or queued as one
 	// message; nil for other agents. Guarded by mu.
@@ -121,6 +125,10 @@ type Node struct {
 	wg     sync.WaitGroup
 	// gate serializes lifecycle transitions with channel writes; collection never takes it.
 	gate                         sync.Mutex
+	collectionGate               sync.Mutex
+	visibilityAck                string
+	visibilityBlocked            bool
+	visibilityAdvertised         bool
 	mu                           sync.Mutex
 	identity                     *pb.Identity
 	names                        nameState
@@ -324,6 +332,9 @@ func (n *Node) evictLocked(now time.Time) {
 	}
 }
 func (n *Node) publishLocked(kind, text, reply string) *pb.Event {
+	if !n.publicLocked() {
+		return nil
+	}
 	n.sequence++
 	e := &pb.Event{SessionId: n.identity.SessionId, NodeId: n.identity.NodeId, Generation: n.identity.Generation, StreamId: n.stream, Sequence: n.sequence, Kind: kind, UnixMillis: time.Now().UnixMilli(), Text: clip(text, maxText), MessageId: id(), ReplyTo: clip(reply, 128)}
 	n.history = append(n.history, e)
@@ -413,6 +424,9 @@ func (n *Node) announce(text, reply string) error {
 	defer n.mu.Unlock()
 	if n.identity.SessionId == "" {
 		return errUnbound
+	}
+	if !n.publicLocked() {
+		return errPrivate
 	}
 	if strings.TrimSpace(text) == "" {
 		return errors.New("text must not be empty")

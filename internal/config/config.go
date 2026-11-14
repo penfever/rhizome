@@ -32,9 +32,9 @@ type Config struct {
 		ConfigDir   string      `toml:"config_dir"`   // CLAUDE_CONFIG_DIR; skills and transcripts live under it.
 		ProjectsDir string      `toml:"projects_dir"` // Transcript root the observer watches; default <config_dir>/projects.
 		PeerHistory PeerHistory `toml:"peer_history"` // Override of gateway.history for Claude-sourced history.
-		// Delivery selects how peer events reach Claude: "channel" pushes
+		// Delivery selects how peer events reach Claude Code: "channel" pushes
 		// notifications/claude/channel; "hooks" returns them as hook
-		// additionalContext for accounts where channels are unavailable.
+		// additionalContext for accounts whose organization has not enabled channels.
 		Delivery string `toml:"delivery"`
 	} `toml:"claude"`
 	Codex struct {
@@ -120,7 +120,7 @@ func (n Network) Validate() error {
 	return nil
 }
 
-// Claude delivery paths for claude.delivery.
+// Claude delivery paths accepted by claude.delivery.
 const (
 	ClaudeDeliveryChannel = "channel"
 	ClaudeDeliveryHooks   = "hooks"
@@ -444,7 +444,7 @@ func resolveDocument(c Config, home string, file []byte, flags map[string]string
 		c.Sources[s.key] = source
 	}
 	if c.Claude.Delivery != ClaudeDeliveryChannel && c.Claude.Delivery != ClaudeDeliveryHooks {
-		return c, fmt.Errorf("config %s: claude.delivery must be %q or %q (%s)", path, ClaudeDeliveryChannel, ClaudeDeliveryHooks, c.Sources["claude.delivery"])
+		return c, fmt.Errorf("config %s: claude.delivery %q must be %q or %q (%s)", path, c.Claude.Delivery, ClaudeDeliveryChannel, ClaudeDeliveryHooks, c.Sources["claude.delivery"])
 	}
 	if c.Codex.Delivery != CodexDeliveryQueue && c.Codex.Delivery != CodexDeliverySteer {
 		return c, fmt.Errorf("config %s: codex.delivery must be %q or %q (%s)", path, CodexDeliveryQueue, CodexDeliverySteer, c.Sources["codex.delivery"])

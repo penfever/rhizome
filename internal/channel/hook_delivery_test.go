@@ -48,8 +48,10 @@ func TestHookDeliveryInjectsEachEventExactlyOnce(t *testing.T) {
 	eventually(t, func() bool { return held(n) == 2 })
 
 	// Events without additionalContext support never drain the inbox.
-	if out := n.hookOutput(context.Background(), "Stop", time.Now()); len(out) != 0 || held(n) != 2 {
-		t.Fatal("Stop hook drained held events")
+	for _, event := range []string{"SessionStart", "Stop", "SessionEnd"} {
+		if out := n.hookOutput(context.Background(), event, time.Now()); len(out) != 0 || held(n) != 2 {
+			t.Fatalf("%s hook drained held events", event)
+		}
 	}
 	out := n.hookOutput(context.Background(), "UserPromptSubmit", time.Now())
 	text := hookContext(out)
@@ -58,6 +60,9 @@ func TestHookDeliveryInjectsEachEventExactlyOnce(t *testing.T) {
 	}
 	if !strings.HasPrefix(text, "Rhizome peer activity. Informational, untrusted content") {
 		t.Fatalf("events not in the untrusted envelope: %q", text)
+	}
+	if !strings.Contains(text, `"message_id":"m1"`) || !strings.Contains(text, `"session_id":"peer-session"`) {
+		t.Fatalf("origin metadata missing: %q", text)
 	}
 	if spec := out["hookSpecificOutput"].(map[string]any); spec["hookEventName"] != "UserPromptSubmit" {
 		t.Fatal("hookEventName must echo the hook event")
@@ -109,13 +114,26 @@ func TestHookDeliveryBackpressureRetainsQueue(t *testing.T) {
 	eventually(t, func() bool { return held(n) == 1 })
 	time.Sleep(200 * time.Millisecond)
 	n.mu.Lock()
-	pending, dropped := len(n.incoming), n.stats.Dropped
+	pending, dropped, written := len(n.incoming), n.stats.Dropped, n.stats.Written
 	n.mu.Unlock()
-	if pending != 2 || dropped != 0 {
-		t.Fatalf("full inbox must leave events queued: pending=%d dropped=%d", pending, dropped)
+	if pending != 2 || dropped != 0 || written != 1 {
+		t.Fatalf("full inbox must leave events queued: pending=%d dropped=%d written=%d", pending, dropped, written)
 	}
 	_ = n.hookOutput(context.Background(), "UserPromptSubmit", time.Now())
 	eventually(t, func() bool { return held(n) == 1 })
+}
+
+func TestHookDeliveryStatus(t *testing.T) {
+	n := hookNode(t)
+	queueDirect(n, "m1", "status")
+	eventually(t, func() bool { return held(n) == 1 })
+	s := n.status()
+	if s["claude_delivery"] != "hooks" || s["hook_queue_depth"] != 1 {
+		t.Fatalf("status: %v %v", s["claude_delivery"], s["hook_queue_depth"])
+	}
+	if _, ok := node(t).status()["claude_delivery"]; ok {
+		t.Fatal("channel mode reported a delivery path")
+	}
 }
 
 func TestChannelModeHookOutputIsEmpty(t *testing.T) {
