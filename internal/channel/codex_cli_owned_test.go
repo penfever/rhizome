@@ -1,6 +1,8 @@
 package channel
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,10 +16,13 @@ func cliOwnedNode(t *testing.T, owned bool) (*Node, *fakeCodex, *queueRecorder) 
 	return n, f, q
 }
 
-// Reproduces the 2026-11-11 hold: a thread owned by a standalone `codex` CLI
-// reads as notLoaded in the managed daemon, and every message stayed held with
-// zero handoff attempts. A CLI-owned thread now gets the shared-queue handoff.
-func TestCodexNotLoadedCLIOwnedThreadIsDelivered(t *testing.T) {
+// Reproduces the 2026-11-14 backlog: a thread owned by a standalone Codex
+// process (`codex exec … resume`) reads as notLoaded in the daemon, and the
+// gateway handed events to `codex queue`. The owning process never reads the
+// daemon's queue store, so items reached its 100-item cap and every later
+// handoff failed while the outbox filled. Such a thread is never queued; its
+// next tool-call hook carries the held events.
+func TestCodexCLIOwnedThreadDeliversThroughHooks(t *testing.T) {
 	n, f, q := cliOwnedNode(t, true)
 	if !n.codex.scan(n.ctx, n, 1) && !n.deliveryReady {
 		t.Fatalf("collector kept delivery closed: %q", n.collectionState)
@@ -25,33 +30,94 @@ func TestCodexNotLoadedCLIOwnedThreadIsDelivered(t *testing.T) {
 	if n.collectionState != codexCLIOwnedState {
 		t.Fatalf("state %q", n.collectionState)
 	}
-	hold(t, n, "m1")
+	hold(t, n, "m1", "m2")
 	n.flushCodex(n.ctx, threadA)
-	if got := q.sent(); len(got) != 1 || !strings.Contains(got[0], "m1") {
-		t.Fatalf("want one queue handoff, got %q", got)
+	if len(q.sent()) != 0 || outboxHeld(n) != 2 {
+		t.Fatalf("CLI-owned thread was queued: sent %q held %d", q.sent(), outboxHeld(n))
 	}
 	for _, c := range f.calls {
 		if c == "turn/steer" {
 			t.Fatal("steer must not be tried on a thread the daemon has not loaded")
 		}
 	}
-	// Later events within the interval coalesce into one later handoff instead
-	// of one CLI turn each.
-	hold(t, n, "m2", "m3")
-	n.flushCodex(n.ctx, threadA)
-	if len(q.sent()) != 1 || outboxHeld(n) != 2 {
-		t.Fatalf("want m2, m3 held, sent %d held %d", len(q.sent()), outboxHeld(n))
+	got := hookContext(n.codexHookOutput(context.Background(), "PreToolUse", time.Now()))
+	if !strings.Contains(got, "m1") || !strings.Contains(got, "m2") || !strings.Contains(got, "<rhizome-peer-event>") {
+		t.Fatalf("hook context %q", got)
+	}
+	if outboxHeld(n) != 0 || n.stats.HookInjected != 2 {
+		t.Fatalf("held %d injected %d", outboxHeld(n), n.stats.HookInjected)
+	}
+	// Each event is injected once.
+	if again := n.codexHookOutput(context.Background(), "PreToolUse", time.Now()); len(again) != 0 {
+		t.Fatalf("second hook re-delivered: %v", again)
 	}
 	n.mu.Lock()
-	n.codexOut.cliQueuedAt = time.Now().Add(-codexCLIQueueInterval)
+	last := n.codexOut.last
 	n.mu.Unlock()
-	n.flushCodex(n.ctx, threadA)
-	got := q.sent()
-	if len(got) != 2 || !strings.Contains(got[1], "m2") || !strings.Contains(got[1], "m3") || outboxHeld(n) != 0 {
-		t.Fatalf("want m2+m3 in one handoff, got %q", got)
+	if last == nil || last.Mode != "hook" || last.Events != 2 {
+		t.Fatalf("last handoff %+v", last)
 	}
-	if n.stats.QueueHandoffs != 3 {
-		t.Fatalf("QueueHandoffs %d", n.stats.QueueHandoffs)
+}
+
+// A large backlog drains over several hooks, each within codexHookChunk.
+func TestCodexHookOutputChunksBacklog(t *testing.T) {
+	n, _, _ := cliOwnedNode(t, true)
+	body := strings.Repeat("x", 6*1024)
+	for i := 0; i < 10; i++ {
+		if err := n.holdForCodex(context.Background(), body, map[string]string{"message_id": fmt.Sprint("m", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hooks := 0
+	for outboxHeld(n) > 0 {
+		got := hookContext(n.codexHookOutput(context.Background(), "UserPromptSubmit", time.Now()))
+		if got == "" || len(got) > codexHookChunk {
+			t.Fatalf("hook %d context of %d bytes", hooks, len(got))
+		}
+		hooks++
+		if hooks > 10 {
+			t.Fatal("backlog did not drain")
+		}
+	}
+	if hooks < 2 || n.stats.HookInjected != 10 {
+		t.Fatalf("hooks %d injected %d", hooks, n.stats.HookInjected)
+	}
+}
+
+// Hooks that cannot carry context, spent budgets, and in-flight flushes leave
+// held events alone.
+func TestCodexHookOutputLeavesEventsHeld(t *testing.T) {
+	n, _, _ := cliOwnedNode(t, true)
+	hold(t, n, "m1")
+	if out := n.codexHookOutput(context.Background(), "Stop", time.Now()); len(out) != 0 {
+		t.Fatalf("Stop hook drained: %v", out)
+	}
+	if out := n.codexHookOutput(context.Background(), "PreToolUse", time.Now().Add(-hookDeliveryBudget)); len(out) != 0 {
+		t.Fatalf("late hook drained: %v", out)
+	}
+	n.mu.Lock()
+	n.codexOut.flushing = true
+	n.mu.Unlock()
+	if out := n.codexHookOutput(context.Background(), "PreToolUse", time.Now()); len(out) != 0 {
+		t.Fatalf("hook drained during a flush: %v", out)
+	}
+	if outboxHeld(n) != 1 {
+		t.Fatalf("held %d", outboxHeld(n))
+	}
+}
+
+// A daemon-loaded idle thread is still queued; a hook in the same window
+// finds nothing left, so the event goes out once.
+func TestCodexIdleThreadQueuedNotDuplicatedByHook(t *testing.T) {
+	f := &fakeCodex{thread: threadA, status: "idle"}
+	n, q := codexOutboxNode(t, true, f)
+	hold(t, n, "m1")
+	n.flushCodex(n.ctx, threadA)
+	if len(q.sent()) != 1 || outboxHeld(n) != 0 {
+		t.Fatalf("sent %d held %d", len(q.sent()), outboxHeld(n))
+	}
+	if out := n.codexHookOutput(context.Background(), "PreToolUse", time.Now()); len(out) != 0 {
+		t.Fatalf("hook re-delivered a queued event: %v", out)
 	}
 }
 

@@ -225,12 +225,20 @@ func makeServer(resolve func(*mcp.CallToolRequest) (*Node, error), kind agentKin
 			return result(n.hookOutput(ctx, in.Event, started), nil)
 		})
 	case agentCodex:
-		mcp.AddTool(s, &mcp.Tool{Name: "observe_session", Description: "Internal hook-only Codex session binding. Never invoke manually."}, func(ctx context.Context, r *mcp.CallToolRequest, in codexHook) (*mcp.CallToolResult, any, error) {
+		mcp.AddTool(s, &mcp.Tool{Name: "observe_session", Description: "Internal hook-only Codex session binding and held peer-event delivery. Never invoke manually."}, func(ctx context.Context, r *mcp.CallToolRequest, in codexHook) (*mcp.CallToolResult, any, error) {
 			n, err := resolve(r)
 			if err != nil {
 				return result(nil, err)
 			}
-			return result(map[string]any{}, n.observeCodex(ctx, in.hook()))
+			started := time.Now()
+			if err := n.observeCodex(ctx, in.hook()); err != nil {
+				return result(nil, err)
+			}
+			if in.AgentID != nil && *in.AgentID != "" {
+				// Subagent hooks share the thread; held events go to the main thread.
+				return result(map[string]any{}, nil)
+			}
+			return result(n.codexHookOutput(ctx, in.Event, started), nil)
 		})
 	case agentOpenCode, agentPi:
 		// Binding comes only from the trusted plugin/extension bridge; the model cannot bind.
@@ -269,7 +277,7 @@ func makeServer(resolve func(*mcp.CallToolRequest) (*Node, error), kind agentKin
 		err := n.unsubscribe(in.SessionID)
 		return result(n.status(), err)
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "publish", Description: "Announce text to current subscribers. Limited with send to ten calls per minute."}, func(ctx context.Context, r *mcp.CallToolRequest, in textInput) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "publish", Description: "Announce text to current subscribers. Limited with send to sixty calls per minute."}, func(ctx context.Context, r *mcp.CallToolRequest, in textInput) (*mcp.CallToolResult, any, error) {
 		n, resolveErr := resolve(r)
 		if resolveErr != nil {
 			return result(nil, resolveErr)

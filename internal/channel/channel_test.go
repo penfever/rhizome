@@ -358,7 +358,7 @@ func backpressureRetentionAndRate(t *testing.T, policy config.PeerActivityPolicy
 		t.Fatal("age retention")
 	}
 	n.mu.Unlock()
-	for i := 0; i < 10; i++ {
+	for i := 0; i < maxExplicitPerMinute; i++ {
 		if err := n.announce("test", ""); err != nil {
 			t.Fatal(err)
 		}
@@ -399,8 +399,10 @@ func circuitBreakerAndRearm(t *testing.T, policy config.PeerActivityPolicy) {
 		contents = append(contents, text)
 		return nil
 	}
+	// Automatic feed events from distinct sessions are not coalesced, so each
+	// one is a notification.
 	for i := 0; i < 35; i++ {
-		n.enqueueLocked(&pb.Event{NodeId: "peer", SessionId: "remote", Kind: "direct", Text: "hello", MessageId: fmt.Sprint(i)}, "", "", 1)
+		n.enqueueLocked(&pb.Event{NodeId: "peer", SessionId: fmt.Sprint("remote", i), Kind: "activity", Text: "hello", MessageId: fmt.Sprint(i)}, "", "", 1)
 	}
 	n.mu.Unlock()
 	n.wg.Add(1)
@@ -411,10 +413,54 @@ func circuitBreakerAndRearm(t *testing.T, policy config.PeerActivityPolicy) {
 		t.Fatalf("notifications %d", len(contents))
 	}
 	mu.Unlock()
-	if err := n.subscribe("remote"); err != nil {
+	// Direct messages are never held behind the feed breaker.
+	n.mu.Lock()
+	n.enqueueLocked(&pb.Event{NodeId: "peer", SessionId: "remote0", Kind: "direct", Text: "urgent", MessageId: "direct-after-pause"}, "", "", 1)
+	n.mu.Unlock()
+	eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(contents) == 32 && strings.Contains(contents[31], "urgent")
+	})
+	n.mu.Lock()
+	if held := len(n.incoming); held != 5 {
+		n.mu.Unlock()
+		t.Fatalf("paused feed events %d, want 5", held)
+	}
+	n.mu.Unlock()
+	if err := n.subscribe("remote34"); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, func() bool { n.mu.Lock(); defer n.mu.Unlock(); return len(n.incoming) == 0 })
+	eventually(t, func() bool { n.mu.Lock(); defer n.mu.Unlock(); return len(n.incoming) == 4 })
+}
+
+// Reproduces the 2026-11-14 coordinator stall: a burst of direct messages to
+// one receiver must not trip the breaker that pauses every later message.
+func TestDirectBurstDoesNotPause(t *testing.T) {
+	n := node(t)
+	bind(t, n, "local", t.TempDir())
+	var mu sync.Mutex
+	delivered := 0
+	n.mu.Lock()
+	n.ready = true
+	n.notify = func(ctx context.Context, text string, meta map[string]string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		delivered++
+		return nil
+	}
+	for i := 0; i < 60; i++ {
+		n.enqueueLocked(&pb.Event{NodeId: "peer", SessionId: "remote", Kind: "direct", Text: "hello", MessageId: fmt.Sprint(i)}, "", "", 1)
+	}
+	n.mu.Unlock()
+	n.wg.Add(1)
+	go func() { defer n.wg.Done(); n.deliver(n.ctx) }()
+	eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return delivered == 60 })
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.stats.Pauses != 0 || n.paused {
+		t.Fatalf("direct burst paused delivery: pauses %d", n.stats.Pauses)
+	}
 }
 func TestMCPHandshakeAndTools(t *testing.T) {
 	n := node(t)

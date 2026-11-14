@@ -170,7 +170,7 @@ func (n *Node) receiverDeliveryLocked() string {
 	case n.codexOut != nil && len(n.codexOut.held) > 0:
 		state = fmt.Sprintf("held in Codex outbox behind %d event(s): %s", len(n.codexOut.held), n.codexOut.state)
 	case n.codexOut != nil && n.collectionState == codexCLIOwnedState:
-		state = "queued for the owning Codex CLI; read when its next turn starts"
+		state = codexHookWaitState
 	case n.hookDelivery:
 		state = "held for the receiver's next prompt or tool-call hook"
 	default:

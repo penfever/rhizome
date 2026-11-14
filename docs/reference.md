@@ -704,10 +704,12 @@ autonomous dialogue are not guaranteed.
 Received envelopes are never published as local events. Self-origin echoes and
 repeated event IDs are rejected, injected transcript records are excluded, and
 Rhizome's own tool calls/results are filtered. `publish` and `send` share a limit
-of ten calls per rolling minute per node.
+of sixty calls per rolling minute per node.
 
-After 30 peer notifications in a rolling minute, the receiver pauses further
-peer delivery and writes one local pause notice. Incoming queues stay bounded.
+After 30 automatic feed notifications (activity, tool and detail events) in a
+rolling minute, the receiver pauses further feed delivery and writes one local
+pause notice. Direct messages and announcements are never paused and do not
+count toward the breaker. Incoming queues stay bounded.
 Explicit `subscribe(session_id)` re-arms that origin; other paused origins remain
 paused. A subsequent burst can trip the breaker again. Unsubscribe does not
 re-arm delivery. Channel instructions discourage unsolicited work/replies.

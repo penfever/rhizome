@@ -165,18 +165,23 @@ them over as one message, each event keeping its own envelope:
   steer (compaction, review, a turn that just ended) is retried every two
   seconds. After a minute of failures the events are queued instead.
 
-- **Thread owned by a standalone `codex` CLI:** the CLI runs its own
-  in-process App Server, so the managed daemon reports its threads as
-  `notLoaded`. When the gateway's parent process is a live standalone Codex CLI
-  (not `codex app-server`), such a thread is deliverable: events are handed to
-  `codex queue` through the daemon, whose queue store the CLI shares, and the
-  CLI starts a turn from it (immediately when idle, otherwise when the running
-  turn ends). Steering is not possible, activity is not collected, and
-  handoffs are spaced at least 30 s apart so a burst becomes one turn.
-  `collection_state` reads "notLoaded in the App Server daemon; thread owned
-  by the Codex CLI …".
+- **Any thread, at its next hook:** the main thread's next `PreToolUse`,
+  `UserPromptSubmit` or `SessionStart` `observe_session` hook returns held
+  events as `hookSpecificOutput.additionalContext` (at most 32 KiB per hook;
+  the rest goes with the following hooks). A hook never drains events while a
+  queue or steer handoff is in flight, so each event is delivered once.
+- **Thread owned by a standalone Codex process** (`codex exec`, or a CLI not
+  attached to the managed daemon): the process runs its own in-process App
+  Server, so the daemon reports its threads as `notLoaded`, and it never reads
+  the daemon's queue store. Items handed to `codex queue` for such a thread are
+  never consumed; the daemon refuses a thread's 101st item ("queue cannot
+  contain more than 100 submissions"). When the gateway's parent process is a
+  live standalone Codex process (not `codex app-server`), events are therefore
+  held for its hooks and never queued: they arrive at the model's next tool
+  call or prompt, inside the running turn. `collection_state` reads
+  "notLoaded in the App Server daemon; thread owned by the Codex process …".
 
-`notLoaded` without a live owning CLI, `systemError`, a disconnected reader, or
+`notLoaded` without a live owning Codex process, `systemError`, a disconnected reader, or
 unavailable history keeps events held. A queue command that exits with an error keeps them
 for retry. One that times out or is killed may already have queued the
 message, so it is not retried; `list_sessions` reports it under
@@ -187,15 +192,16 @@ read or acted on the event.
 `oldest_held_at`, a human-readable `state` (for example "2 held for the end of
 Codex turn …") and `last_handoff`. `Received`/`Queued` count receiver
 acceptance and `Written` counts events placed in the outbox. `QueueHandoffs`
-and `Steered` count events handed to `codex queue` or steered.
+and `Steered` count events handed to `codex queue` or steered; `HookInjected`
+counts events returned through hooks (`last_handoff.mode` "hook").
 `QueueFailures` and `SteerFailures` count failed attempts. A sender on the
 same device can call `delivery_status(session_id, agent_type, message_id)`,
 which reports `in_transcript` once the envelope is in the receiver's native
 log.
 
 The existing two-second/8-KiB automatic batches, 256-event receiving queue,
-ten explicit sends/publications per minute per node, and 30-notification circuit
-breaker apply. An explicit `subscribe(session_id)` re-arms that origin. These
+sixty explicit sends/publications per minute per node, and 30-notification circuit
+breaker on automatic feeds apply. An explicit `subscribe(session_id)` re-arms that origin. These
 controls do not guarantee that models cannot generate new reactions.
 
 ## Verification

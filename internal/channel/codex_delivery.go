@@ -19,7 +19,17 @@ import (
 //   - running turn, codex.delivery = "steer": turn/steer, so the model reads it
 //     at its next step, as when the user types during a turn;
 //   - running turn, codex.delivery = "queue": one Rhizome item per turn at
-//     most; later events wait in the outbox and go together.
+//     most; later events wait in the outbox and go together;
+//   - any thread, at its next main-thread observe_session hook (PreToolUse,
+//     UserPromptSubmit, SessionStart): hookSpecificOutput.additionalContext.
+//
+// The hook path is the only one that reaches a thread owned by a standalone
+// Codex process (`codex exec`, or a CLI not attached to the App Server
+// daemon). The daemon reports such a thread as notLoaded, and items given to
+// `codex queue` for it land in the daemon's queue store, which the owning
+// process never reads: they piled up to the daemon's 100-item cap ("queue
+// cannot contain more than 100 submissions"), after which every handoff
+// failed and the outbox filled. Those threads are therefore never queued.
 //
 // Held events are visible in list_sessions (codex_outbox). A handoff whose
 // acceptance is unknown (a timed-out CLI) is reported there, never retried.
@@ -30,12 +40,12 @@ const (
 	// approval prompts) before held events are queued for the next turn instead.
 	codexSteerFallback = time.Minute
 	codexUncertainKept = 32
-	// codexCLIQueueInterval spaces queue handoffs to a CLI-owned thread, whose
-	// turns the daemon cannot see: each handoff becomes one turn, so events
-	// arriving within the interval are coalesced into the next handoff.
-	codexCLIQueueInterval = 30 * time.Second
-	codexNotLoaded        = "notLoaded"
-	codexCLIOwnedState    = "notLoaded in the App Server daemon; thread owned by the Codex CLI that started this gateway, delivering through the shared queue"
+	// codexHookChunk bounds one hook's additionalContext; the rest of the
+	// outbox goes out with the following hooks.
+	codexHookChunk     = 32 * 1024
+	codexNotLoaded     = "notLoaded"
+	codexCLIOwnedState = "notLoaded in the App Server daemon; thread owned by the Codex process that started this gateway, delivering at its next tool-call or prompt hook"
+	codexHookWaitState = "held for the owning Codex process's next tool-call or prompt hook"
 )
 
 type codexHeld struct {
@@ -70,10 +80,12 @@ type codexOutbox struct {
 	last       *codexHandoff
 	uncertain  []codexHandoff
 	// cliOwned reports whether this gateway was started by a live standalone
-	// Codex CLI (not the App Server daemon); only then does a notLoaded thread
-	// count as deliverable. cliQueuedAt is the last queue handoff to it.
-	cliOwned    func() bool
-	cliQueuedAt time.Time
+	// Codex process (not the App Server daemon); only then does a notLoaded
+	// thread count as deliverable, through hooks.
+	cliOwned func() bool
+	// flushing is set while flushCodex hands a snapshot of held to Codex; the
+	// hook path leaves held alone meanwhile so neither path delivers twice.
+	flushing bool
 }
 
 func newCodexOutbox(steer bool, cliOwned func() bool, queue func(context.Context, string) error) *codexOutbox {
@@ -168,9 +180,19 @@ func (n *Node) flushCodex(ctx context.Context, thread string) {
 		n.mu.Unlock()
 		return
 	}
+	if o.flushing {
+		n.mu.Unlock()
+		return
+	}
 	batch := append([]codexHeld(nil), o.held...)
 	reader := n.codex.reader
+	o.flushing = true
 	n.mu.Unlock()
+	defer func() {
+		n.mu.Lock()
+		o.flushing = false
+		n.mu.Unlock()
+	}()
 
 	status, turn, err := codexActiveTurn(ctx, reader, thread)
 	if err != nil {
@@ -188,16 +210,8 @@ func (n *Node) flushCodex(ctx context.Context, thread string) {
 		turn = ""
 		err = o.queue(ctx, message)
 	case status == codexNotLoaded && n.codexCLIOwned():
-		turn = ""
-		n.mu.Lock()
-		wait := codexCLIQueueInterval - time.Since(o.cliQueuedAt)
-		n.mu.Unlock()
-		if wait > 0 {
-			n.holdCodex(fmt.Sprintf("%d held for the next queue handoff to the Codex CLI in %s", len(batch), wait.Round(time.Second)))
-			return
-		}
-		mode = "cli-queue"
-		err = o.queue(ctx, message)
+		n.holdCodex(fmt.Sprintf("%d %s", len(batch), codexHookWaitState))
+		return
 	case status != "active":
 		n.holdCodex(fmt.Sprintf("Codex thread status %q; %d held", status, len(batch)))
 		return
@@ -269,9 +283,6 @@ func (n *Node) finishCodex(batch []codexHeld, mode, turn string, err error) {
 		switch mode {
 		case "steer":
 			n.stats.Steered += uint64(len(batch))
-		case "cli-queue":
-			n.stats.QueueHandoffs += uint64(len(batch))
-			o.cliQueuedAt = time.Now()
 		default:
 			n.stats.QueueHandoffs += uint64(len(batch))
 			o.queued, o.queuedTurn = true, turn
@@ -290,6 +301,46 @@ func (n *Node) finishCodex(batch []codexHeld, mode, turn string, err error) {
 		default:
 		}
 	}
+}
+
+// codexHookOutput drains held events into Codex hook JSON for event, at most
+// codexHookChunk bytes (always at least one event). It returns an empty object
+// for events that cannot carry additionalContext, while a flush is in flight,
+// and once the hook's context is done or its budget since started is spent.
+func (n *Node) codexHookOutput(ctx context.Context, event string, started time.Time) map[string]any {
+	if event != "PreToolUse" && event != "UserPromptSubmit" && event != "SessionStart" {
+		return map[string]any{}
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	o := n.codexOut
+	if o == nil || o.flushing || len(o.held) == 0 || !n.publicLocked() || ctx.Err() != nil || time.Since(started) >= hookDeliveryBudget {
+		return map[string]any{}
+	}
+	take, size := 0, 0
+	for take < len(o.held) && (take == 0 || size+len(o.held[take].envelope) <= codexHookChunk) {
+		size += len(o.held[take].envelope)
+		take++
+	}
+	batch := o.held[:take]
+	envelopes := make([]string, take)
+	ids := []string{}
+	for i, h := range batch {
+		envelopes[i] = h.envelope
+		if h.messageID != "" {
+			ids = append(ids, h.messageID)
+		}
+	}
+	o.held = o.held[take:]
+	o.bytes -= size
+	o.last = &codexHandoff{Mode: "hook", At: time.Now(), Events: take, MessageIDs: ids}
+	o.state = "delivered"
+	if len(o.held) > 0 {
+		o.state = fmt.Sprintf("%d %s", len(o.held), codexHookWaitState)
+	}
+	n.stats.HookInjected += uint64(take)
+	n.deliveryError = ""
+	return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": event, "additionalContext": strings.Join(envelopes, "\n\n")}}
 }
 
 // codexOutboxStatus is the list_sessions view; the caller holds n.mu.

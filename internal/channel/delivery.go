@@ -74,6 +74,11 @@ func (n *Node) enqueueLocked(e *pb.Event, subscription, token string, generation
 	}
 	return true
 }
+
+// maxFeedNotifications is the per-minute budget of automatic feed deliveries
+// before the receiver pauses its feeds.
+const maxFeedNotifications = 30
+
 func automatic(e *pb.Event) bool {
 	return e.Kind == "activity" || e.Kind == "tool" || e.Kind == "turn" || detailKind(e.Kind)
 }
@@ -146,7 +151,9 @@ func (n *Node) deliver(ctx context.Context) {
 			if p.event.GatewayHost != "" && !gatewayEvents[p.event] {
 				continue
 			} // validate newly queued events on the next tick
-			if n.paused && !n.rearmed[p.event.SessionId] {
+			// The pause throttles automatic feeds only: a direct message or
+			// announcement is never held behind it.
+			if n.paused && automatic(p.event) && !n.rearmed[p.event.SessionId] {
 				continue
 			}
 			if automatic(p.event) {
@@ -167,7 +174,7 @@ func (n *Node) deliver(ctx context.Context) {
 			continue
 		}
 		n.notifications = prune(n.notifications, now)
-		if len(n.notifications) >= 30 {
+		if automatic(n.incoming[index].event) && len(n.notifications) >= maxFeedNotifications {
 			n.paused = true
 			n.rearmed = map[string]bool{}
 			n.notifications = nil
@@ -223,7 +230,9 @@ func (n *Node) deliver(ctx context.Context) {
 				n.stats.QueueHandoffs++
 				n.deliveryError = ""
 			}
-			n.notifications = append(n.notifications, now)
+			if automatic(e) {
+				n.notifications = append(n.notifications, now)
+			}
 		} else if errors.Is(err, errDestinationUnavailable) {
 			// Preserve selected events ahead of later arrivals while the reader is
 			// unavailable; the same bounded queue still applies.

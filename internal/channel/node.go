@@ -411,10 +411,16 @@ func prune(times []time.Time, now time.Time) []time.Time {
 	}
 	return times[i:]
 }
+
+// maxExplicitPerMinute bounds publish/send calls per session per minute: a
+// guard against a looping agent, high enough for a coordinator that messages
+// a dozen workers at once.
+const maxExplicitPerMinute = 60
+
 func (n *Node) rateLocked() error {
 	n.explicit = prune(n.explicit, time.Now())
-	if len(n.explicit) >= 10 {
-		return errors.New("rate limit: at most ten publish/send calls per minute")
+	if len(n.explicit) >= maxExplicitPerMinute {
+		return fmt.Errorf("rate limit: at most %d publish/send calls per minute", maxExplicitPerMinute)
 	}
 	n.explicit = append(n.explicit, time.Now())
 	return nil

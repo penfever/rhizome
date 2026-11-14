@@ -355,7 +355,8 @@ func TestUpdateNoticeDoesNotBlockPeerDelivery(t *testing.T) {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.stats.Written != 1 || len(n.notifications) != 1 {
+	// A direct message is written but does not count toward the feed breaker.
+	if n.stats.Written != 1 || len(n.notifications) != 0 {
 		t.Fatalf("written %d notifications %d", n.stats.Written, len(n.notifications))
 	}
 }
